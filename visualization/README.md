@@ -21,6 +21,7 @@ Si no se pasa --output, el script elige por defecto:
 ## Script principal
 
 - animate_run.py
+- runtime_vs_n.py (TP3 1.1)
 
 ## Ejemplo de uso
 
@@ -61,3 +62,26 @@ python visualization/animate_run.py \
 En vivo: la animacion puede estar embebida en la diapositiva.
 
 En PDF: no se debe entregar la animacion embebida. Se recomienda usar el PNG representativo y agregar debajo un link explicito a YouTube/Vimeo segun la guia.
+
+## TP3 1.1 - Runtime vs N
+
+Script para ejecutar corridas y graficar tiempo de ejecucion vs numero de particulas.
+
+Ejemplo completo (ejecuta simulaciones + grafica):
+
+python visualization/runtime_vs_n.py \
+  --n-values 50,100,150,200,250,300 \
+  --tf 5 \
+  --repetitions 3 \
+  --snapshot-every 1
+
+Salida por defecto:
+- CSV crudo: visualization/out/runtime_vs_n.csv
+- Figura: visualization/out/runtime_vs_n.png
+
+Modo solo grafico (sin correr simulaciones):
+
+python visualization/runtime_vs_n.py \
+  --only-plot \
+  --results-csv visualization/out/runtime_vs_n.csv \
+  --figure visualization/out/runtime_vs_n.png
