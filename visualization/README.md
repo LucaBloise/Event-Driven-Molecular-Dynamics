@@ -139,3 +139,54 @@ Recomendacion para criterio estricto de catedra:
 Nota importante para 1.2:
 - Usar --snapshot-every=1 para no perder cambios de estado FRESH->USED
   al reconstruir Cfc(t) desde output.txt.
+
+## TP3 1.3 - Fraccion de particulas usadas Fu(t)
+
+Script para ejecutar realizaciones para varios N, reconstruir
+Fu(t)=Nu(t)/N, detectar estacionario de nivel y reportar:
+- tiempo al estacionario t_est,
+- fraccion estacionaria Fest,
+ambos en funcion de N.
+
+Por defecto:
+- corre simulaciones,
+- detecta estacionario automaticamente por realizacion (test de nivel sin regresion),
+- en modo auto elige un unico t_est global con politica max,
+- recalcula Fest en todas las corridas usando ese mismo t_est global,
+- guarda CSV por corrida,
+- grafica Fest(N) con barras de error,
+- grafica t_est(N),
+- y genera una figura de diagnostico con ejemplos de Fu(t) + referencia estacionaria.
+
+Ejemplo completo (ejecuta simulaciones + analiza + grafica):
+
+python visualization/used_fraction_vs_n.py \
+  --n-values 50,100,150,200 \
+  --tf 800 \
+  --repetitions 5 \
+  --snapshot-every 1
+
+Salida por defecto:
+- CSV por realizacion: visualization/out/used_fraction_vs_n.csv
+- Figura principal: visualization/out/used_fraction_stationary_vs_n.png
+- Figura inicio estacionario: visualization/out/used_fraction_stationary_start_vs_n.png
+- Figura diagnostico Fu(t): visualization/out/used_fraction_stationarity_examples.png
+- Resumen textual: visualization/out/used_fraction_stationary_summary.txt
+
+Modo solo grafico (sin correr simulaciones):
+
+python visualization/used_fraction_vs_n.py \
+  --only-plot \
+  --results-csv visualization/out/used_fraction_vs_n.csv
+
+Opciones de estacionario:
+- Modo automatico (default): --stationary-mode auto
+- Politica de seleccion de t_est global en auto: --global-stationary-policy max
+- Modo manual: --stationary-mode manual --stationary-start 40
+- Modo fraccion fija de cola: --stationary-mode tail --tail-start-fraction 0.5
+
+Nota importante para 1.3:
+- Usar --snapshot-every=1 para preservar resolucion temporal de Fu(t).
+- Fu(t) instantaneo no es necesariamente monotono: una particula puede pasar
+  de USED a FRESH al volver a la pared externa.
+- El criterio auto de estacionario en 1.3 es deliberadamente mas laxo que en 1.2.
