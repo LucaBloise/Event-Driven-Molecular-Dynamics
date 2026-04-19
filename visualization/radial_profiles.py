@@ -118,12 +118,12 @@ def build_radial_bins(r0: float, l: float, ds: float) -> Tuple[List[float], List
 
     return s_centers, shell_areas
 
-
 def parse_output_radial_profiles(
     output_path: Path,
     r0: float,
     l: float,
     ds: float,
+    stationary_start_time: float = 0.0,
 ) -> Tuple[List[float], List[float], List[int], List[float], int]:
     """Reconstruye acumulados por bin radial desde output.txt.
 
@@ -138,6 +138,7 @@ def parse_output_radial_profiles(
     - total_sum_vr[k]      = suma temporal de velocidades radiales en bin k
     - frame_count
     """
+        
     if not output_path.exists():
         raise FileNotFoundError(f"No se encontro output.txt en {output_path}")
 
@@ -150,6 +151,8 @@ def parse_output_radial_profiles(
     frame_count = 0
 
     frame_active = False
+    frame_time = None
+    frame_is_usable = False
     frame_counts = [0 for _ in range(n_bins)]
     frame_sum_vr = [0.0 for _ in range(n_bins)]
 
@@ -163,6 +166,11 @@ def parse_output_radial_profiles(
             record_type = tokens[0]
 
             if record_type == "FRAME":
+                if len(tokens) < 7:
+                    raise ValueError(f"Linea FRAME invalida en {output_path}:{line_number}")
+
+                frame_time = float(tokens[3])
+                frame_is_usable = frame_time >= stationary_start_time
                 frame_active = True
                 frame_counts = [0 for _ in range(n_bins)]
                 frame_sum_vr = [0.0 for _ in range(n_bins)]
@@ -171,10 +179,11 @@ def parse_output_radial_profiles(
                 if not frame_active:
                     raise ValueError(f"PARTICLE fuera de FRAME en {output_path}:{line_number}")
 
-                # Formato confirmado por tu ejemplo:
-                # PARTICLE <id> <x_m> <y_m> <vx_m_s> <vy_m_s> <state> <color_r> <color_g> <color_b>
                 if len(tokens) < 10:
                     raise ValueError(f"Linea PARTICLE invalida en {output_path}:{line_number}")
+
+                if not frame_is_usable:
+                    continue
 
                 x = float(tokens[2])
                 y = float(tokens[3])
@@ -204,18 +213,23 @@ def parse_output_radial_profiles(
                 if not frame_active:
                     raise ValueError(f"END_FRAME fuera de FRAME en {output_path}:{line_number}")
 
-                for k in range(n_bins):
-                    total_counts[k] += frame_counts[k]
-                    total_sum_vr[k] += frame_sum_vr[k]
+                if frame_is_usable:
+                    for k in range(n_bins):
+                        total_counts[k] += frame_counts[k]
+                        total_sum_vr[k] += frame_sum_vr[k]
 
-                frame_count += 1
+                    frame_count += 1
+
                 frame_active = False
+                frame_time = None
+                frame_is_usable = False
 
     if frame_count <= 0:
-        raise ValueError(f"No hay frames validos en {output_path}")
+        raise ValueError(
+            f"No hay frames validos en {output_path} para t >= {stationary_start_time}"
+        )
 
     return s_centers, shell_areas, total_counts, total_sum_vr, frame_count
-
 
 def run_single_simulation(
     repo_root: Path,
@@ -269,6 +283,7 @@ def collect_radial_profile_runs(
     r0: float,
     l: float,
     ds: float,
+    stationary_start_time: float,
 ) -> List[RadialProfileRun]:
     if shutil.which("bash") is None:
         raise EnvironmentError("No se encontro 'bash' en PATH. Se necesita para ejecutar simulation/run.sh")
@@ -302,6 +317,7 @@ def collect_radial_profile_runs(
                 r0=r0,
                 l=l,
                 ds=ds,
+                stationary_start_time=stationary_start_time,
             )
 
             run = RadialProfileRun(
@@ -554,7 +570,7 @@ def plot_s2_vs_n(stats: Sequence[RadialProfileStats], target_s: float, output_pa
 
 def write_summary_txt(stats: Sequence[RadialProfileStats], target_s: float, summary_path: Path) -> None:
     lines: List[str] = []
-    lines.append("radial_profiles_summary_v1")
+    lines.append("radial_profiles_summary")
     lines.append(f"target_s_m={target_s:.10f}")
     lines.append("")
 
@@ -590,7 +606,7 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
     parser.add_argument(
         "--n-values",
         type=str,
-        default="200,400,600,800",
+        default="100,200,300,400",
         help="Lista de N separada por comas.",
     )
     parser.add_argument("--tf", type=float, default=800.0, help="Tiempo absoluto de simulacion en segundos.")
@@ -609,7 +625,7 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
     parser.add_argument(
         "--target-s",
         type=float,
-        default=2.0,
+        default=2.1,
         help="Valor de S objetivo para la figura de magnitudes vs N.",
     )
 
@@ -656,6 +672,12 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
         help="No ejecuta simulaciones. Solo lee --results-csv y genera figuras.",
     )
 
+    parser.add_argument(
+        "--stationary-start",
+        type=float,
+        default=0.0,
+        help="Solo usa frames con t >= stationary-start para construir perfiles radiales.",
+    )
     return parser.parse_args()
 
 
@@ -676,7 +698,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--target-s debe ser > 0")
     if args.r0 >= args.l / 2.0:
         raise ValueError("--r0 debe ser menor que L/2")
-
+    if args.stationary_start < 0.0:
+        raise ValueError("--stationary-start debe ser >= 0")
 
 def main() -> None:
     repo_root = Path(__file__).resolve().parent.parent
@@ -701,6 +724,7 @@ def main() -> None:
             r0=args.r0,
             l=args.l,
             ds=args.ds,
+            stationary_start_time=args.stationary_start,
         )
         write_radial_profiles_csv(runs, args.results_csv)
         print(f"CSV guardado en: {args.results_csv.resolve()}")
