@@ -4,8 +4,6 @@ import java.nio.file.Path;
 import java.util.Locale;
 
 public final class SimulationMain {
-    private SimulationMain() {
-    }
 
     public static void main(final String[] args) {
         if (SimulationConfig.hasHelpFlag(args)) {

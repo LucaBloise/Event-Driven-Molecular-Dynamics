@@ -15,7 +15,6 @@ Este script:
       1) perfiles radiales para cada N
       2) valores en la capa cercana a S=2 en función de N
 """
-
 from __future__ import annotations
 
 import argparse
@@ -49,8 +48,11 @@ class RadialProfileStats:
     n_particles: int
     s_centers: Tuple[float, ...]
     rho_mean: Tuple[float, ...]
+    rho_std: Tuple[float, ...]
     v_mean: Tuple[float, ...]
+    v_std: Tuple[float, ...]
     jin_mean: Tuple[float, ...]
+    jin_std: Tuple[float, ...]
     total_frames: int
     repetitions: int
 
@@ -119,6 +121,7 @@ def build_radial_bins(r0: float, l: float, ds: float) -> Tuple[List[float], List
 
     return s_centers, shell_areas
 
+
 def parse_output_radial_profiles(
     output_path: Path,
     r0: float,
@@ -126,20 +129,6 @@ def parse_output_radial_profiles(
     ds: float,
     stationary_start_time: float = 0.0,
 ) -> Tuple[List[float], List[float], List[int], List[float], int]:
-    """Reconstruye acumulados por bin radial desde output.txt.
-
-    Selecciona solo partículas:
-    - en estado FRESH
-    - con R . v < 0 (velocidad radial hacia el centro)
-
-    Devuelve:
-    - s_centers[k]
-    - shell_areas[k]
-    - total_counts[k]      = suma temporal de número de partículas frescas entrantes en bin k
-    - total_sum_vr[k]      = suma temporal de velocidades radiales en bin k
-    - frame_count
-    """
-        
     if not output_path.exists():
         raise FileNotFoundError(f"No se encontro output.txt en {output_path}")
 
@@ -218,7 +207,6 @@ def parse_output_radial_profiles(
                     for k in range(n_bins):
                         total_counts[k] += frame_counts[k]
                         total_sum_vr[k] += frame_sum_vr[k]
-
                     frame_count += 1
 
                 frame_active = False
@@ -231,6 +219,7 @@ def parse_output_radial_profiles(
         )
 
     return s_centers, shell_areas, total_counts, total_sum_vr, frame_count
+
 
 def run_single_simulation(
     repo_root: Path,
@@ -373,11 +362,7 @@ def aggregate_radial_profile_stats(runs: Sequence[RadialProfileRun]) -> List[Rad
     for n_particles in sorted(grouped.keys()):
         run_group = grouped[n_particles]
         first = run_group[0]
-
         n_bins = len(first.s_centers)
-        total_frames = 0
-        total_counts = [0 for _ in range(n_bins)]
-        total_sum_vr = [0.0 for _ in range(n_bins)]
 
         for run in run_group:
             if run.s_centers != first.s_centers:
@@ -385,33 +370,82 @@ def aggregate_radial_profile_stats(runs: Sequence[RadialProfileRun]) -> List[Rad
             if run.shell_areas != first.shell_areas:
                 raise ValueError(f"Inconsistencia de areas radiales en N={n_particles}")
 
+        rho_per_run: List[List[float]] = []
+        v_per_run: List[List[float]] = []
+        jin_per_run: List[List[float]] = []
+
+        total_frames = 0
+
+        for run in run_group:
             total_frames += run.frame_count
+
+            rho_run: List[float] = []
+            v_run: List[float] = []
+            jin_run: List[float] = []
+
             for k in range(n_bins):
-                total_counts[k] += run.counts_fresh_inward[k]
-                total_sum_vr[k] += run.sum_vr_fresh_inward[k]
+                rho_k = run.counts_fresh_inward[k] / (run.shell_areas[k] * run.frame_count)
+                v_k = (
+                    run.sum_vr_fresh_inward[k] / run.counts_fresh_inward[k]
+                    if run.counts_fresh_inward[k] > 0
+                    else 0.0
+                )
+                jin_k = rho_k * abs(v_k)
+
+                rho_run.append(rho_k)
+                v_run.append(v_k)
+                jin_run.append(jin_k)
+
+            rho_per_run.append(rho_run)
+            v_per_run.append(v_run)
+            jin_per_run.append(jin_run)
 
         rho_mean: List[float] = []
+        rho_std: List[float] = []
         v_mean: List[float] = []
+        v_std: List[float] = []
         jin_mean: List[float] = []
+        jin_std: List[float] = []
+
+        repetitions = len(run_group)
 
         for k in range(n_bins):
-            rho_k = total_counts[k] / (first.shell_areas[k] * total_frames)
-            v_k = total_sum_vr[k] / total_counts[k] if total_counts[k] > 0 else 0.0
-            jin_k = rho_k * abs(v_k)
+            rho_values = [rho_per_run[r][k] for r in range(repetitions)]
+            v_values = [v_per_run[r][k] for r in range(repetitions)]
+            jin_values = [jin_per_run[r][k] for r in range(repetitions)]
 
-            rho_mean.append(rho_k)
-            v_mean.append(v_k)
-            jin_mean.append(jin_k)
+            rho_mean_k = sum(rho_values) / repetitions
+            v_mean_k = sum(v_values) / repetitions
+            jin_mean_k = sum(jin_values) / repetitions
+
+            if repetitions > 1:
+                rho_std_k = math.sqrt(sum((x - rho_mean_k) ** 2 for x in rho_values) / (repetitions - 1))
+                v_std_k = math.sqrt(sum((x - v_mean_k) ** 2 for x in v_values) / (repetitions - 1))
+                jin_std_k = math.sqrt(sum((x - jin_mean_k) ** 2 for x in jin_values) / (repetitions - 1))
+            else:
+                rho_std_k = 0.0
+                v_std_k = 0.0
+                jin_std_k = 0.0
+
+            rho_mean.append(rho_mean_k)
+            rho_std.append(rho_std_k)
+            v_mean.append(v_mean_k)
+            v_std.append(v_std_k)
+            jin_mean.append(jin_mean_k)
+            jin_std.append(jin_std_k)
 
         stats.append(
             RadialProfileStats(
                 n_particles=n_particles,
                 s_centers=first.s_centers,
                 rho_mean=tuple(rho_mean),
+                rho_std=tuple(rho_std),
                 v_mean=tuple(v_mean),
+                v_std=tuple(v_std),
                 jin_mean=tuple(jin_mean),
+                jin_std=tuple(jin_std),
                 total_frames=total_frames,
-                repetitions=len(run_group),
+                repetitions=repetitions,
             )
         )
 
@@ -503,36 +537,87 @@ def read_radial_profiles_csv(csv_path: Path) -> List[RadialProfileRun]:
     runs.sort(key=lambda run: (run.n_particles, run.repetition))
     return runs
 
-
 def plot_radial_profiles_per_n(stat: RadialProfileStats, output_path: Path) -> None:
     configure_plot_style()
 
     s = list(stat.s_centers)
+
     rho = list(stat.rho_mean)
+    rho_std = list(stat.rho_std)
+
     v_abs = [abs(value) for value in stat.v_mean]
+    v_std = list(stat.v_std)
+
     jin = list(stat.jin_mean)
+    jin_std = list(stat.jin_std)
 
-    fig, ax = plt.subplots(figsize=(11, 8))
+    fig, axes = plt.subplots(3, 1, figsize=(11, 14), sharex=True)
 
-    ax.plot(s, rho, marker="o", markersize=4, linewidth=1.8, label=r"<rho_fin>(S)")
-    ax.plot(s, v_abs, marker="s", markersize=4, linewidth=1.8, label=r"|<v_fin>(S)|")
-    ax.plot(s, jin, marker="^", markersize=4, linewidth=1.8, label=r"J_in(S)")
+    def filter_nonzero(x, y, ystd):
+        filtered_x = []
+        filtered_y = []
+        filtered_std = []
+        for xi, yi, si in zip(x, y, ystd):
+            if abs(yi) > 0.001:
+                filtered_x.append(xi)
+                filtered_y.append(yi)
+                filtered_std.append(si)
+        return filtered_x, filtered_y, filtered_std
 
-    ax.set_xlabel("S (m)")
-    ax.set_ylabel("Valor")
-    ax.set_title(
-        f"Perfiles radiales de particulas frescas entrantes, "
-        f"N={stat.n_particles}, repeticiones={stat.repetitions}"
+    # 1) Densidad
+    s_rho, rho_f, rho_std_f = filter_nonzero(s, rho, rho_std)
+    if s_rho:
+        axes[0].plot(s_rho, rho_f, linewidth=2.0, label=r"$\langle \rho_{fin} \rangle(S)$")
+        axes[0].fill_between(
+            s_rho,
+            [max(0.0, m - sd) for m, sd in zip(rho_f, rho_std_f)],
+            [m + sd for m, sd in zip(rho_f, rho_std_f)],
+            alpha=0.25,
+        )
+    axes[0].set_ylabel(r"$\langle \rho_{fin} \rangle(S)$")
+    axes[0].grid(True, which="major", alpha=0.25)
+    axes[0].legend(loc="best")
+
+    # 2) Velocidad radial
+    s_v, v_f, v_std_f = filter_nonzero(s, v_abs, v_std)
+    if s_v:
+        axes[1].plot(s_v, v_f, linewidth=2.0, label=r"$|\langle v_{fin} \rangle(S)|$")
+        axes[1].fill_between(
+            s_v,
+            [max(0.0, m - sd) for m, sd in zip(v_f, v_std_f)],
+            [m + sd for m, sd in zip(v_f, v_std_f)],
+            alpha=0.25,
+        )
+    axes[1].set_ylabel(r"$|\langle v_{fin} \rangle(S)|$")
+    axes[1].grid(True, which="major", alpha=0.25)
+    axes[1].legend(loc="best")
+
+    # 3) Flujo
+    s_j, jin_f, jin_std_f = filter_nonzero(s, jin, jin_std)
+    if s_j:
+        axes[2].plot(s_j, jin_f, linewidth=2.0, label=r"$J_{in}(S)$")
+        axes[2].fill_between(
+            s_j,
+            [max(0.0, m - sd) for m, sd in zip(jin_f, jin_std_f)],
+            [m + sd for m, sd in zip(jin_f, jin_std_f)],
+            alpha=0.25,
+        )
+    axes[2].set_ylabel(r"$J_{in}(S)$")
+    axes[2].set_xlabel("S (m)")
+    axes[2].grid(True, which="major", alpha=0.25)
+    axes[2].legend(loc="best")
+
+    fig.suptitle(
+        f"Perfiles radiales de partículas frescas entrantes, "
+        f"N={stat.n_particles}, repeticiones={stat.repetitions}",
+        y=0.995,
     )
-    ax.grid(True, which="major", alpha=0.25)
-    ax.legend(loc="best")
 
-    fig.subplots_adjust(left=0.12, right=0.98, top=0.94, bottom=0.11)
+    fig.subplots_adjust(left=0.18, right=0.98, top=0.95, bottom=0.08, hspace=0.18)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
-
 
 def nearest_bin_index(values: Sequence[float], target: float) -> int:
     if not values:
@@ -548,47 +633,94 @@ def nearest_bin_index(values: Sequence[float], target: float) -> int:
             best_index = index
 
     return best_index
-
-
 def plot_s2_vs_n(stats: Sequence[RadialProfileStats], target_s: float, output_path: Path) -> None:
     configure_plot_style()
 
     ns: List[int] = []
     rho_values: List[float] = []
+    rho_stds: List[float] = []
     v_values: List[float] = []
+    v_stds: List[float] = []
     jin_values: List[float] = []
-
-    chosen_s = None
+    jin_stds: List[float] = []
 
     for stat in stats:
         bin_index = nearest_bin_index(stat.s_centers, target_s)
+
         ns.append(stat.n_particles)
+
         rho_values.append(stat.rho_mean[bin_index])
-        v_values.append(stat.v_mean[bin_index])
+        rho_stds.append(stat.rho_std[bin_index])
+
+        v_values.append(abs(stat.v_mean[bin_index]))
+        v_stds.append(stat.v_std[bin_index])
+
         jin_values.append(stat.jin_mean[bin_index])
+        jin_stds.append(stat.jin_std[bin_index])
 
-        if chosen_s is None:
-            chosen_s = stat.s_centers[bin_index]
+    def filter_nonzero(x, y, yerr):
+        filtered_x = []
+        filtered_y = []
+        filtered_err = []
+        for xi, yi, ei in zip(x, y, yerr):
+            if abs(yi) > 0.0:
+                filtered_x.append(xi)
+                filtered_y.append(yi)
+                filtered_err.append(ei)
+        return filtered_x, filtered_y, filtered_err
 
-    fig, ax = plt.subplots(figsize=(11, 8))
+    fig, axes = plt.subplots(3, 1, figsize=(11, 14), sharex=True)
 
-    ax.plot(ns, jin_values, marker="^", markersize=7, linewidth=1.8, label=r"J_in(S≈2)")
-    ax.plot(ns, rho_values, marker="o", markersize=7, linewidth=1.8, label=r"<rho_fin>(S≈2)")
-    ax.plot(ns, v_values, marker="s", markersize=7, linewidth=1.8, label=r"<v_fin>(S≈2)")
+    # 1) Densidad
+    ns_rho, rho_f, rho_err_f = filter_nonzero(ns, rho_values, rho_stds)
+    if ns_rho:
+        axes[0].errorbar(
+            ns_rho,
+            rho_f,
+            yerr=rho_err_f,
+            marker="o",
+            linewidth=1.8,
+            capsize=5,
+        )
+    axes[0].set_ylabel(r"$\langle \rho_{fin} \rangle$")
+    axes[0].grid(True, which="major", alpha=0.25)
 
-    ax.set_xlabel("Numero de particulas N (-)")
-    ax.set_ylabel("Valor")
-    if chosen_s is not None:
-        ax.set_title(f"Magnitudes en la capa cercana a S={chosen_s:.2f} m")
-    ax.grid(True, which="major", alpha=0.25)
-    ax.legend(loc="best")
+    # 2) Velocidad radial
+    ns_v, v_f, v_err_f = filter_nonzero(ns, v_values, v_stds)
+    if ns_v:
+        axes[1].errorbar(
+            ns_v,
+            v_f,
+            yerr=v_err_f,
+            marker="s",
+            linewidth=1.8,
+            capsize=5,
+        )
+    axes[1].set_ylabel(r"$|\langle v_{fin} \rangle|$")
+    axes[1].grid(True, which="major", alpha=0.25)
 
-    fig.subplots_adjust(left=0.12, right=0.98, top=0.94, bottom=0.11)
+    # 3) Flujo
+    ns_j, jin_f, jin_err_f = filter_nonzero(ns, jin_values, jin_stds)
+    if ns_j:
+        axes[2].errorbar(
+            ns_j,
+            jin_f,
+            yerr=jin_err_f,
+            marker="^",
+            linewidth=1.8,
+            capsize=5,
+        )
+    axes[2].set_ylabel(r"$J_{in}$")
+    axes[2].set_xlabel("N")
+    axes[2].grid(True, which="major", alpha=0.25)
+
+    fig.suptitle("S = 2", y=0.995)
+
+    fig.subplots_adjust(left=0.16, right=0.98, top=0.95, bottom=0.08, hspace=0.18)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
-
 
 def write_summary_txt(stats: Sequence[RadialProfileStats], target_s: float, summary_path: Path) -> None:
     lines: List[str] = []
@@ -600,15 +732,21 @@ def write_summary_txt(stats: Sequence[RadialProfileStats], target_s: float, summ
         bin_index = nearest_bin_index(stat.s_centers, target_s)
         s_used = stat.s_centers[bin_index]
         rho_value = stat.rho_mean[bin_index]
+        rho_std = stat.rho_std[bin_index]
         v_value = stat.v_mean[bin_index]
+        v_std = stat.v_std[bin_index]
         jin_value = stat.jin_mean[bin_index]
+        jin_std = stat.jin_std[bin_index]
 
         lines.append(
             f"N={stat.n_particles} "
             f"S_used_m={s_used:.10f} "
             f"rho_mean={rho_value:.10f} "
+            f"rho_std={rho_std:.10f} "
             f"v_mean={v_value:.10f} "
+            f"v_std={v_std:.10f} "
             f"jin_mean={jin_value:.10f} "
+            f"jin_std={jin_std:.10f} "
             f"total_frames={stat.total_frames} "
             f"repetitions={stat.repetitions}"
         )
@@ -628,7 +766,7 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
     parser.add_argument(
         "--n-values",
         type=str,
-        default="100,200,300,400",
+        default="50,100,150,200,250,300,400,500",
         help="Lista de N separada por comas.",
     )
     parser.add_argument("--tf", type=float, default=800.0, help="Tiempo absoluto de simulacion en segundos.")
@@ -731,13 +869,14 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.stationary_start < 0.0:
         raise ValueError("--stationary-start debe ser >= 0")
 
+
 def main() -> None:
     repo_root = Path(__file__).resolve().parent.parent
     args = parse_args(repo_root)
     validate_args(args)
 
     n_values = parse_n_values(args.n_values)
-    
+
     if args.only_plot:
         runs = read_radial_profiles_csv(args.results_csv)
         print(f"Modo only-plot: {len(runs)} realizaciones leidas de {args.results_csv}")
