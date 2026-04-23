@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 import shutil
 import statistics
 import subprocess
@@ -343,22 +344,32 @@ def choose_global_stationary_start(
 
 def run_single_simulation(
     repo_root: Path,
-    run_script: Path,
     run_dir: Path,
     n_particles: int,
     tf_seconds: float,
     seed: int,
     snapshot_every: int,
 ) -> None:
-    cmd = [
-        "bash",
-        str(run_script),
+    common_args = [
         f"--n={n_particles}",
         f"--tf={tf_seconds}",
         f"--seed={seed}",
         f"--snapshot-every={snapshot_every}",
         f"--output-dir={run_dir}",
     ]
+
+    if os.name == "nt":
+        run_script = repo_root / "simulation" / "run.bat"
+        if not run_script.exists():
+            raise FileNotFoundError(f"No se encontro run.bat en {run_script}")
+        cmd = ["cmd", "/c", str(run_script), *common_args]
+    else:
+        if shutil.which("bash") is None:
+            raise EnvironmentError("No se encontro 'bash' en PATH. Se necesita para ejecutar simulation/run.sh")
+        run_script = repo_root / "simulation" / "run.sh"
+        if not run_script.exists():
+            raise FileNotFoundError(f"No se encontro run.sh en {run_script}")
+        cmd = ["bash", str(run_script), *common_args]
 
     process = subprocess.run(
         cmd,
@@ -430,15 +441,9 @@ def collect_used_fraction_records(
     snapshot_every: int,
     outputs_base_dir: Path,
     run_prefix: str,
+    reuse_existing_runs: bool,
     args: argparse.Namespace,
 ) -> List[UsedFractionRecord]:
-    if shutil.which("bash") is None:
-        raise EnvironmentError("No se encontro 'bash' en PATH. Se necesita para ejecutar simulation/run.sh")
-
-    run_script = repo_root / "simulation" / "run.sh"
-    if not run_script.exists():
-        raise FileNotFoundError(f"No se encontro run.sh en {run_script}")
-
     outputs_base_dir.mkdir(parents=True, exist_ok=True)
 
     run_series_list: List[RunSeries] = []
@@ -448,15 +453,38 @@ def collect_used_fraction_records(
             seed = seed_base + n_particles * 1000 + repetition
             run_dir = outputs_base_dir / f"{run_prefix}_n{n_particles}_rep{repetition}"
 
-            run_single_simulation(
-                repo_root=repo_root,
-                run_script=run_script,
-                run_dir=run_dir,
-                n_particles=n_particles,
-                tf_seconds=tf_seconds,
-                seed=seed,
-                snapshot_every=snapshot_every,
-            )
+            if reuse_existing_runs:
+                if not run_dir.exists():
+                    raise FileNotFoundError(
+                        "No se encontro corrida existente para reutilizar en "
+                        f"{run_dir}. Verifica --outputs-base-dir/--run-prefix/--n-values/--repetitions"
+                    )
+
+                properties_path = run_dir / "properties.txt"
+                output_path = run_dir / "output.txt"
+                if not properties_path.exists() or not output_path.exists():
+                    raise FileNotFoundError(
+                        "Faltan archivos de salida en corrida existente: "
+                        f"{run_dir} (se esperan output.txt y properties.txt)"
+                    )
+
+                properties = parse_properties(properties_path)
+                written_stride = int(properties.get("snapshot_every_events", str(snapshot_every)))
+                if written_stride != 1:
+                    raise ValueError(
+                        "Para reconstruir Fu(t) correctamente, snapshot_every_events debe ser 1. "
+                        f"Se encontro {written_stride} en {properties_path}"
+                    )
+                seed = int(properties.get("seed", str(seed)))
+            else:
+                run_single_simulation(
+                    repo_root=repo_root,
+                    run_dir=run_dir,
+                    n_particles=n_particles,
+                    tf_seconds=tf_seconds,
+                    seed=seed,
+                    snapshot_every=snapshot_every,
+                )
 
             output_path = run_dir / "output.txt"
             times, fu_values = parse_output_used_fraction_timeseries(output_path)
@@ -844,13 +872,7 @@ def plot_stationarity_examples(
 
         ax.axhline(record.f_est, color="#2ca02c", linestyle=":", linewidth=1.6)
 
-        info_text = (
-            f"N={record.n_particles}, rep={record.repetition} | "
-            f"Fest={record.f_est:.4f} | "
-            f"t_local={record.detected_stationary_start_s:.2f} s | "
-            f"t_used={record.stationary_start_s:.2f} s"
-        )
-        ax.text(0.02, 0.96, info_text, transform=ax.transAxes, va="top", ha="left", fontsize=11)
+        ax.set_title(f"N = {record.n_particles}", fontsize=12, pad=10)
 
         ax.set_xlabel("Tiempo t (s)")
         ax.set_ylabel("Fu(t) (-)")
@@ -863,7 +885,7 @@ def plot_stationarity_examples(
         col = panel_index % cols
         axes[row][col].axis("off")
 
-    fig.subplots_adjust(left=0.08, right=0.985, top=0.97, bottom=0.10, wspace=0.16, hspace=0.22)
+    fig.subplots_adjust(left=0.08, right=0.985, top=0.97, bottom=0.10, wspace=0.16, hspace=0.30)
 
     output_figure_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_figure_path, dpi=180)
@@ -957,6 +979,14 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
         type=str,
         default="tp3_1_3",
         help="Prefijo de nombre de carpeta para cada corrida.",
+    )
+    parser.add_argument(
+        "--reuse-existing-runs",
+        action="store_true",
+        help=(
+            "No ejecuta simulaciones nuevas. Reutiliza corridas existentes en --outputs-base-dir "
+            "con nombres <run-prefix>_nN_repR y reconstruye Fu(t) desde output.txt."
+        ),
     )
     parser.add_argument(
         "--results-csv",
@@ -1125,6 +1155,7 @@ def main() -> None:
             snapshot_every=args.snapshot_every,
             outputs_base_dir=args.outputs_base_dir,
             run_prefix=args.run_prefix,
+            reuse_existing_runs=args.reuse_existing_runs,
             args=args,
         )
         write_used_fraction_csv(records, args.results_csv)

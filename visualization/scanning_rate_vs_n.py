@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 import shutil
 import statistics
 import subprocess
@@ -387,22 +388,32 @@ def build_record_from_series(
 
 def run_single_simulation(
     repo_root: Path,
-    run_script: Path,
     run_dir: Path,
     n_particles: int,
     tf_seconds: float,
     seed: int,
     snapshot_every: int,
 ) -> None:
-    cmd = [
-        "bash",
-        str(run_script),
+    common_args = [
         f"--n={n_particles}",
         f"--tf={tf_seconds}",
         f"--seed={seed}",
         f"--snapshot-every={snapshot_every}",
         f"--output-dir={run_dir}",
     ]
+
+    if os.name == "nt":
+        run_script = repo_root / "simulation" / "run.bat"
+        if not run_script.exists():
+            raise FileNotFoundError(f"No se encontro run.bat en {run_script}")
+        cmd = ["cmd", "/c", str(run_script), *common_args]
+    else:
+        if shutil.which("bash") is None:
+            raise EnvironmentError("No se encontro 'bash' en PATH. Se necesita para ejecutar simulation/run.sh")
+        run_script = repo_root / "simulation" / "run.sh"
+        if not run_script.exists():
+            raise FileNotFoundError(f"No se encontro run.sh en {run_script}")
+        cmd = ["bash", str(run_script), *common_args]
 
     process = subprocess.run(
         cmd,
@@ -442,15 +453,9 @@ def collect_scanning_records(
     snapshot_every: int,
     outputs_base_dir: Path,
     run_prefix: str,
+    reuse_existing_runs: bool,
     args: argparse.Namespace,
 ) -> List[ScanningRecord]:
-    if shutil.which("bash") is None:
-        raise EnvironmentError("No se encontro 'bash' en PATH. Se necesita para ejecutar simulation/run.sh")
-
-    run_script = repo_root / "simulation" / "run.sh"
-    if not run_script.exists():
-        raise FileNotFoundError(f"No se encontro run.sh en {run_script}")
-
     outputs_base_dir.mkdir(parents=True, exist_ok=True)
 
     run_series_list: List[RunSeries] = []
@@ -460,19 +465,43 @@ def collect_scanning_records(
             seed = seed_base + n_particles * 1000 + repetition
             run_dir = outputs_base_dir / f"{run_prefix}_n{n_particles}_rep{repetition}"
 
-            run_single_simulation(
-                repo_root=repo_root,
-                run_script=run_script,
-                run_dir=run_dir,
-                n_particles=n_particles,
-                tf_seconds=tf_seconds,
-                seed=seed,
-                snapshot_every=snapshot_every,
-            )
+            if reuse_existing_runs:
+                if not run_dir.exists():
+                    raise FileNotFoundError(
+                        "No se encontro corrida existente para reutilizar en "
+                        f"{run_dir}. Verifica --outputs-base-dir/--run-prefix/--n-values/--repetitions"
+                    )
+
+                properties_path = run_dir / "properties.txt"
+                output_path = run_dir / "output.txt"
+                if not properties_path.exists() or not output_path.exists():
+                    raise FileNotFoundError(
+                        "Faltan archivos de salida en corrida existente: "
+                        f"{run_dir} (se esperan output.txt y properties.txt)"
+                    )
+
+                properties = parse_properties(properties_path)
+                written_stride = int(properties.get("snapshot_every_events", str(snapshot_every)))
+                if written_stride != 1:
+                    raise ValueError(
+                        "Para reconstruir Cfc(t) correctamente, snapshot_every_events debe ser 1. "
+                        f"Se encontro {written_stride} en {properties_path}"
+                    )
+                seed = int(properties.get("seed", str(seed)))
+            else:
+                run_single_simulation(
+                    repo_root=repo_root,
+                    run_dir=run_dir,
+                    n_particles=n_particles,
+                    tf_seconds=tf_seconds,
+                    seed=seed,
+                    snapshot_every=snapshot_every,
+                )
 
             output_path = run_dir / "output.txt"
             times, cfc_values = parse_output_cfc_timeseries(output_path)
-            start_index, detection_mode = select_stationary_start_index(times, cfc_values, args)
+            start_index = 0
+            detection_mode = "from_t0"
 
             run_series = RunSeries(
                 n_particles=n_particles,
@@ -488,36 +517,24 @@ def collect_scanning_records(
 
             print(
                 f"[OK][detect] N={n_particles:4d} rep={repetition:2d} seed={seed} "
-                f"t_est_local={run_series.detected_stationary_start_s:.3f} s "
+                f"t_inicio={run_series.detected_stationary_start_s:.3f} s "
                 f"mode={run_series.detection_mode}"
             )
 
     if not run_series_list:
         raise ValueError("No se generaron corridas para analizar")
 
-    if args.stationary_mode == "auto":
-        global_stationary_start_s, global_stationary_selection = choose_global_stationary_start(
-            run_series=run_series_list,
-            selection_policy=args.global_stationary_policy,
-        )
-        print(
-            f"[INFO] t_est global elegido automaticamente: {global_stationary_start_s:.6f} s "
-            f"(politica={global_stationary_selection})"
-        )
-    else:
-        global_stationary_start_s = run_series_list[0].detected_stationary_start_s
-        global_stationary_selection = f"{args.stationary_mode}_per_run"
+    global_stationary_start_s = run_series_list[0].times[0]
+    global_stationary_selection = "from_t0"
+    print(
+        f"[INFO] Ajuste lineal de J usando toda la serie desde t={global_stationary_start_s:.6f} s"
+    )
 
     records: List[ScanningRecord] = []
     for run_series in run_series_list:
-        if args.stationary_mode == "auto":
-            applied_start_time = global_stationary_start_s
-            reported_global_start = global_stationary_start_s
-            reported_global_selection = global_stationary_selection
-        else:
-            applied_start_time = run_series.detected_stationary_start_s
-            reported_global_start = run_series.detected_stationary_start_s
-            reported_global_selection = global_stationary_selection
+        applied_start_time = run_series.times[0]
+        reported_global_start = global_stationary_start_s
+        reported_global_selection = global_stationary_selection
 
         record = build_record_from_series(
             series=run_series,
@@ -530,8 +547,7 @@ def collect_scanning_records(
         print(
             f"[OK][fit] N={record.n_particles:4d} rep={record.repetition:2d} seed={record.seed} "
             f"J={record.scanning_rate_j_s_inv:.6f} 1/s "
-            f"t_est_used={record.stationary_start_s:.3f} s "
-            f"t_est_local={record.detected_stationary_start_s:.3f} s "
+            f"t_inicio={record.stationary_start_s:.3f} s "
             f"R2={record.fit_r2:.4f}"
         )
 
@@ -802,7 +818,22 @@ def plot_stationarity_examples(
     output_figure_path: Path,
 ) -> None:
     if not diagnostics:
-        print("[WARN] No hay corridas disponibles para figura de estacionario.")
+        configure_plot_style()
+        fig, ax = plt.subplots(figsize=(10, 4.8))
+        ax.axis("off")
+        ax.text(
+            0.5,
+            0.5,
+            "No hay corridas disponibles para diagnostico Cfc(t).\n"
+            "Verifica que los run_dir del CSV existan y contengan output.txt.",
+            ha="center",
+            va="center",
+            fontsize=12,
+        )
+        output_figure_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_figure_path, dpi=180)
+        plt.close(fig)
+        print("[WARN] No hay corridas disponibles para figura de estacionario. Se genero figura informativa.")
         return
 
     configure_plot_style()
@@ -813,32 +844,27 @@ def plot_stationarity_examples(
 
     fig, axes = plt.subplots(rows, cols, figsize=(8.5 * cols, 4.8 * rows), squeeze=False)
 
+    legend_handles = None
+
     for panel_index, (record, times, cfc_values) in enumerate(diagnostics):
         row = panel_index // cols
         col = panel_index % cols
         ax = axes[row][col]
 
-        ax.plot(times, cfc_values, color="#2ca02c", linewidth=1.8)
-        ax.axvline(record.detected_stationary_start_s, color="#ff7f0e", linestyle="--", linewidth=1.6)
+        cfc_line, = ax.plot(times, cfc_values, color="#2ca02c", linewidth=1.8, label="Cfc(t)")
 
-        if abs(record.global_stationary_start_s - record.detected_stationary_start_s) > 1.0e-9:
-            ax.axvline(record.global_stationary_start_s, color="#9467bd", linestyle=":", linewidth=1.8)
-
-        fit_x = [record.stationary_start_s, record.stationary_end_s]
+        fit_x = [times[0], times[-1]]
         fit_y = [record.fit_intercept + record.scanning_rate_j_s_inv * value for value in fit_x]
-        ax.plot(fit_x, fit_y, color="#d62728", linestyle="-.", linewidth=1.6)
+        fit_line, = ax.plot(fit_x, fit_y, color="#d62728", linestyle="-.", linewidth=1.6, label="Ajuste lineal")
 
-        info_text = (
-            f"N={record.n_particles}, rep={record.repetition} | "
-            f"J={record.scanning_rate_j_s_inv:.4f} 1/s | "
-            f"t_local={record.detected_stationary_start_s:.2f} s | "
-            f"t_used={record.stationary_start_s:.2f} s | "
-            f"R2={record.fit_r2:.3f}"
-        )
-        ax.text(0.02, 0.96, info_text, transform=ax.transAxes, va="top", ha="left", fontsize=11)
+        if legend_handles is None:
+            legend_handles = (cfc_line, fit_line)
+
+        ax.set_title(f"N = {record.n_particles}", fontsize=12, pad=10)
 
         ax.set_xlabel("Tiempo t (s)")
         ax.set_ylabel("Cfc(t) (-)")
+        ax.set_ylim(0.0, 100.0)
         ax.grid(True, which="major", alpha=0.25)
 
     total_axes = rows * cols
@@ -847,7 +873,16 @@ def plot_stationarity_examples(
         col = panel_index % cols
         axes[row][col].axis("off")
 
-    fig.subplots_adjust(left=0.08, right=0.985, top=0.97, bottom=0.10, wspace=0.16, hspace=0.22)
+    if legend_handles is not None:
+        fig.legend(
+            legend_handles,
+            ["Cfc(t)", "Ajuste lineal"],
+            loc="center left",
+            bbox_to_anchor=(0.87, 0.5),
+            frameon=True,
+        )
+
+    fig.subplots_adjust(left=0.08, right=0.85, top=0.97, bottom=0.10, wspace=0.16, hspace=0.30)
 
     output_figure_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_figure_path, dpi=180)
@@ -933,6 +968,14 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
         type=str,
         default="tp3_1_2",
         help="Prefijo de nombre de carpeta para cada corrida.",
+    )
+    parser.add_argument(
+        "--reuse-existing-runs",
+        action="store_true",
+        help=(
+            "No ejecuta simulaciones nuevas. Reutiliza corridas existentes en --outputs-base-dir "
+            "con nombres <run-prefix>_nN_repR y reconstruye Cfc(t) desde output.txt."
+        ),
     )
     parser.add_argument(
         "--results-csv",
@@ -1096,6 +1139,7 @@ def main() -> None:
             snapshot_every=args.snapshot_every,
             outputs_base_dir=args.outputs_base_dir,
             run_prefix=args.run_prefix,
+            reuse_existing_runs=args.reuse_existing_runs,
             args=args,
         )
         write_scanning_csv(records, args.results_csv)

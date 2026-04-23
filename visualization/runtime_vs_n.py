@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import shutil
 import statistics
 import subprocess
@@ -72,22 +73,32 @@ def parse_n_values(raw: str) -> List[int]:
 
 def run_single_simulation(
     repo_root: Path,
-    run_script: Path,
     run_dir: Path,
     n_particles: int,
     tf_seconds: float,
     seed: int,
     snapshot_every: int,
 ) -> RuntimeRecord:
-    cmd = [
-        "bash",
-        str(run_script),
+    common_args = [
         f"--n={n_particles}",
         f"--tf={tf_seconds}",
         f"--seed={seed}",
         f"--snapshot-every={snapshot_every}",
         f"--output-dir={run_dir}",
     ]
+
+    if os.name == "nt":
+        run_script = repo_root / "simulation" / "run.bat"
+        if not run_script.exists():
+            raise FileNotFoundError(f"No se encontro run.bat en {run_script}")
+        cmd = ["cmd", "/c", str(run_script), *common_args]
+    else:
+        if shutil.which("bash") is None:
+            raise EnvironmentError("No se encontro 'bash' en PATH. Se necesita para ejecutar simulation/run.sh")
+        run_script = repo_root / "simulation" / "run.sh"
+        if not run_script.exists():
+            raise FileNotFoundError(f"No se encontro run.sh en {run_script}")
+        cmd = ["bash", str(run_script), *common_args]
 
     process = subprocess.run(
         cmd,
@@ -135,13 +146,6 @@ def collect_runtime_records(
     outputs_base_dir: Path,
     run_prefix: str,
 ) -> List[RuntimeRecord]:
-    if shutil.which("bash") is None:
-        raise EnvironmentError("No se encontro 'bash' en PATH. Se necesita para ejecutar simulation/run.sh")
-
-    run_script = repo_root / "simulation" / "run.sh"
-    if not run_script.exists():
-        raise FileNotFoundError(f"No se encontro run.sh en {run_script}")
-
     outputs_base_dir.mkdir(parents=True, exist_ok=True)
 
     records: List[RuntimeRecord] = []
@@ -152,7 +156,6 @@ def collect_runtime_records(
 
             record = run_single_simulation(
                 repo_root=repo_root,
-                run_script=run_script,
                 run_dir=run_dir,
                 n_particles=n_particles,
                 tf_seconds=tf_seconds,

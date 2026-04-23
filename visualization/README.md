@@ -18,6 +18,13 @@ Si no se pasa --output, el script elige por defecto:
 - animation.mp4 cuando ffmpeg esta disponible
 - animation.gif cuando ffmpeg no esta disponible
 
+Por defecto, la duracion del video depende de la cantidad de frames exportados
+(eventos seleccionados y FPS), no del tiempo fisico simulado.
+Para sincronizar contra tiempo simulado y hacer comparables corridas con distinto N,
+usar `--sync-to-time`.
+En ese modo, la animacion interpola posicion entre eventos usando la velocidad
+del frame anterior para que el movimiento sea mas fluido.
+
 ## Script principal
 
 - animate_run.py
@@ -33,6 +40,13 @@ Usando la ultima corrida disponible automaticamente:
 python visualization/animate_run.py \
   --output visualization/out/animation_latest.mp4
 
+Sincronizado con tiempo simulado (mismo tf => misma duracion a igual velocidad):
+
+python visualization/animate_run.py \
+  --output visualization/out/animation_latest.mp4 \
+  --sync-to-time \
+  --playback-speed 1.0
+
 Especificando una corrida concreta:
 
 python visualization/animate_run.py \
@@ -47,6 +61,11 @@ Para exportar GIF:
 python visualization/animate_run.py \
   --run-dir simulation/outputs/run_n100_seed1776191778790_20260414_153618 \
   --output visualization/out/animation_run100.gif
+
+Velocidad temporal en modo sincronizado:
+- `--playback-speed 1.0`: tiempo simulado real.
+- `--playback-speed 2.0`: video 2x mas rapido (mitad de duracion).
+- `--playback-speed 0.5`: video en camara lenta (doble duracion).
 
 ## Criterios de formato aplicados (Guia de Presentaciones)
 

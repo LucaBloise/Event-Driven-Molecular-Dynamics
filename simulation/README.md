@@ -8,6 +8,19 @@ It does not compute observables or plots. The only responsibilities are:
 - Write full system snapshots to text output files.
 - Write run metadata to a separate properties file.
 
+## Dependencies
+
+Required:
+- Java Development Kit (JDK) 17 or newer.
+  - `javac` must be available to compile sources.
+  - `java` must be available to run the simulation.
+
+Script runner by platform:
+- Linux/macOS: `bash` for `run.sh`.
+- Windows PowerShell: `powershell` (or `pwsh`) for `run.ps1`.
+- Windows CMD: `run.bat` wrapper (internally calls `run.ps1`).
+
+
 ## Implemented System
 
 - Circular domain with diameter `L` (default `80 m`).
@@ -29,6 +42,22 @@ From repository root:
 bash simulation/run.sh --n=200 --tf=5 --seed=123 --snapshot-every=1
 ```
 
+Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File simulation/run.ps1 --n=200 --tf=5 --seed=123 --snapshot-every=1
+```
+
+Windows CMD:
+
+```bat
+simulation\run.bat --n=200 --tf=5 --seed=123 --snapshot-every=1
+```
+
+Notes:
+- `run.bat` is the easiest entrypoint on Windows because it already applies `-ExecutionPolicy Bypass`.
+- `run.ps1` and `run.bat` compile Java sources into `simulation/bin` and then run `SimulationMain` with the provided arguments.
+
 Useful options:
 
 - `--n`
@@ -43,6 +72,16 @@ For full options:
 
 ```bash
 bash simulation/run.sh --help
+```
+
+Equivalent help commands:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File simulation/run.ps1 --help
+```
+
+```bat
+simulation\run.bat --help
 ```
 
 ## Output Organization

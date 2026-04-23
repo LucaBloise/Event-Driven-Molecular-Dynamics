@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
@@ -310,11 +311,97 @@ def default_outputs_root() -> Path:
     return repo_root / "simulation" / "outputs"
 
 
+TIME_EPS = 1.0e-12
+
+
+def build_playback_times_for_simulation_sync(
+    source_frames: Sequence[FrameRecord],
+    fps: int,
+    playback_speed: float,
+) -> List[float]:
+    if not source_frames:
+        raise ValueError("No frames available to synchronize.")
+
+    if len(source_frames) == 1:
+        return [source_frames[0].time_s]
+
+    times = [frame.time_s for frame in source_frames]
+    t_start = times[0]
+    t_end = times[-1]
+    simulated_duration = max(0.0, t_end - t_start)
+
+    if simulated_duration <= 0.0:
+        return [t_start, t_end]
+
+    playback_duration = simulated_duration / playback_speed
+    output_frame_count = max(2, int(round(playback_duration * fps)) + 1)
+
+    playback_times: List[float] = []
+    for k in range(output_frame_count):
+        target_video_time = k / fps
+        target_sim_time = min(t_end, t_start + target_video_time * playback_speed)
+        playback_times.append(target_sim_time)
+
+    playback_times[-1] = t_end
+    return playback_times
+
+
+def interpolate_frame_at_time(
+    source_frames: Sequence[FrameRecord],
+    source_times: Sequence[float],
+    target_time: float,
+) -> FrameRecord:
+    idx = bisect_right(source_times, target_time) - 1
+    if idx < 0:
+        idx = 0
+
+    left = source_frames[idx]
+    if idx >= len(source_frames) - 1:
+        return left
+
+    right = source_frames[idx + 1]
+    dt_total = right.time_s - left.time_s
+    if dt_total <= 0.0:
+        return left
+
+    dt = target_time - left.time_s
+    if dt <= TIME_EPS:
+        return left
+    if dt >= dt_total - TIME_EPS:
+        return right
+
+    interpolated_particles: List[ParticleRecord] = []
+    for particle in left.particles:
+        interpolated_particles.append(
+            ParticleRecord(
+                particle_id=particle.particle_id,
+                x=particle.x + particle.vx * dt,
+                y=particle.y + particle.vy * dt,
+                vx=particle.vx,
+                vy=particle.vy,
+                state=particle.state,
+                color_rgb=particle.color_rgb,
+            )
+        )
+
+    return FrameRecord(
+        frame_index=left.frame_index,
+        event_index=left.event_index,
+        time_s=target_time,
+        event_type=left.event_type,
+        particle_a=left.particle_a,
+        particle_b=left.particle_b,
+        particles=tuple(interpolated_particles),
+    )
+
+
 def build_animation(
     run_dir: Path,
     output_file: Path,
     fps: int,
     frame_step: int,
+    sync_to_time: bool,
+    playback_speed: float,
     dpi: int,
     representative_frame_path: Path | None,
     representative_frame_index: int | None,
@@ -333,6 +420,15 @@ def build_animation(
     selected_frames = frames[::max(1, frame_step)]
     if selected_frames[-1] != frames[-1]:
         selected_frames.append(frames[-1])
+    selected_times = [frame.time_s for frame in selected_frames]
+
+    playback_times: List[float] | None = None
+    if sync_to_time:
+        playback_times = build_playback_times_for_simulation_sync(
+            source_frames=selected_frames,
+            fps=fps,
+            playback_speed=playback_speed,
+        )
 
     particle_radius = safe_float(properties, "particle_radius_m", 1.0)
 
@@ -352,33 +448,42 @@ def build_animation(
     _, _, header_text, footer_text = setup_axes(fig, ax, properties)
     particle_artists = create_particle_artists(ax, selected_frames[0], particle_radius)
 
+    def frame_for_index(frame_idx: int) -> FrameRecord:
+        if playback_times is None:
+            return selected_frames[frame_idx]
+        return interpolate_frame_at_time(selected_frames, selected_times, playback_times[frame_idx])
+
     def init():
-        update_artists_for_frame(selected_frames[0], particle_artists, header_text, footer_text)
+        update_artists_for_frame(frame_for_index(0), particle_artists, header_text, footer_text)
         return tuple(particle_artists)
 
     def update(frame_idx: int):
-        frame = selected_frames[frame_idx]
+        frame = frame_for_index(frame_idx)
         update_artists_for_frame(frame, particle_artists, header_text, footer_text)
         return tuple(particle_artists)
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    writer = resolve_writer(output_file, fps)
 
     anim = animation.FuncAnimation(
         fig,
         update,
         init_func=init,
-        frames=len(selected_frames),
+        frames=len(playback_times) if playback_times is not None else len(selected_frames),
         interval=1000.0 / max(1, fps),
         blit=False,
     )
 
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    writer = resolve_writer(output_file, fps)
     anim.save(output_file, writer=writer, dpi=dpi)
 
     if representative_frame_path is not None:
         if representative_frame_index is None:
-            representative_frame_index = len(selected_frames) // 2
-        representative_frame_index = max(0, min(representative_frame_index, len(selected_frames) - 1))
-        update_artists_for_frame(selected_frames[representative_frame_index], particle_artists, header_text, footer_text)
+            representative_frame_index = (
+                (len(playback_times) if playback_times is not None else len(selected_frames)) // 2
+            )
+        max_idx = (len(playback_times) if playback_times is not None else len(selected_frames)) - 1
+        representative_frame_index = max(0, min(representative_frame_index, max_idx))
+        update_artists_for_frame(frame_for_index(representative_frame_index), particle_artists, header_text, footer_text)
         representative_frame_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(representative_frame_path, dpi=dpi, bbox_inches="tight")
 
@@ -419,6 +524,23 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Usar 1 de cada K frames de evento para acelerar videos largos.",
+    )
+    parser.add_argument(
+        "--sync-to-time",
+        action="store_true",
+        help=(
+            "Sincroniza la duracion del video con tiempo simulado. "
+            "Con esta opcion, dos corridas con el mismo tf duran lo mismo (a igual --playback-speed)."
+        ),
+    )
+    parser.add_argument(
+        "--playback-speed",
+        type=float,
+        default=1.0,
+        help=(
+            "Factor de velocidad temporal al usar --sync-to-time. "
+            "1.0 = tiempo real simulado; 2.0 = el doble de rapido; 0.5 = camara lenta."
+        ),
     )
     parser.add_argument(
         "--dpi",
@@ -463,6 +585,8 @@ def main() -> None:
         raise ValueError("--fps debe ser > 0")
     if args.frame_step <= 0:
         raise ValueError("--frame-step debe ser > 0")
+    if args.playback_speed <= 0:
+        raise ValueError("--playback-speed debe ser > 0")
     if args.dpi <= 0:
         raise ValueError("--dpi debe ser > 0")
 
@@ -471,6 +595,8 @@ def main() -> None:
         output_file=output_file,
         fps=args.fps,
         frame_step=args.frame_step,
+        sync_to_time=args.sync_to_time,
+        playback_speed=args.playback_speed,
         dpi=args.dpi,
         representative_frame_path=args.representative_frame,
         representative_frame_index=args.representative_frame_index,
