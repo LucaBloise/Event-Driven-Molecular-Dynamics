@@ -807,6 +807,7 @@ def plot_stationary_start_vs_n(stats: Sequence[ScanningStats], output_figure_pat
 def build_stationarity_diagnostics(
     records: Sequence[ScanningRecord],
     max_runs: int,
+    target_n_values: Sequence[int] | None = None,
 ) -> List[Tuple[ScanningRecord, List[float], List[int]]]:
     best_by_n: Dict[int, ScanningRecord] = {}
 
@@ -826,7 +827,25 @@ def build_stationarity_diagnostics(
         ):
             best_by_n[record.n_particles] = record
 
-    selected_records = [best_by_n[n_particles] for n_particles in sorted(best_by_n.keys())]
+    selected_records: List[ScanningRecord] = []
+    used_n: set[int] = set()
+
+    if target_n_values is not None:
+        for n_particles in target_n_values:
+            record = best_by_n.get(n_particles)
+            if record is None:
+                print(f"[WARN] No hay corrida disponible para N={n_particles} en stationarity examples.")
+                continue
+            selected_records.append(record)
+            used_n.add(n_particles)
+
+    if len(selected_records) < max_runs:
+        remaining = [
+            best_by_n[n_particles]
+            for n_particles in sorted(best_by_n.keys())
+            if n_particles not in used_n
+        ]
+        selected_records.extend(remaining)
 
     selected_records = selected_records[:max_runs]
 
@@ -872,6 +891,14 @@ def plot_stationarity_examples(
     cols = 2 if panels > 1 else 1
     rows = math.ceil(panels / cols)
 
+    global_y_max = 0.0
+    for _, _, cfc_values in diagnostics:
+        if cfc_values:
+            global_y_max = max(global_y_max, max(cfc_values))
+
+    if global_y_max <= 0.0:
+        global_y_max = 1.0
+
     fig, axes = plt.subplots(rows, cols, figsize=(8.5 * cols, 4.8 * rows), squeeze=False)
 
     legend_handles = None
@@ -894,7 +921,7 @@ def plot_stationarity_examples(
 
         ax.set_xlabel("Tiempo t (s)")
         ax.set_ylabel("Cfc(t) (-)")
-        ax.set_ylim(0.0, 100.0)
+        ax.set_ylim(0.0, global_y_max)
         ax.grid(True, which="major", alpha=0.25)
 
     total_axes = rows * cols
@@ -1035,8 +1062,14 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
     parser.add_argument(
         "--max-diagnostic-runs",
         type=int,
-        default=6,
+        default=7,
         help="Cantidad maxima de corridas mostradas en la figura de estacionario.",
+    )
+    parser.add_argument(
+        "--stationarity-n-values",
+        type=str,
+        default="100,200,300,400,500,600,700",
+        help="Ns priorizados para la figura stationarity examples (separados por coma).",
     )
     parser.add_argument(
         "--skip-stationarity-figure",
@@ -1201,7 +1234,12 @@ def main() -> None:
     print(f"Figura t_est(N) guardada en: {args.stationary_start_figure.resolve()}")
 
     if not args.skip_stationarity_figure:
-        diagnostics = build_stationarity_diagnostics(records, args.max_diagnostic_runs)
+        stationarity_n_values = parse_n_values(args.stationarity_n_values)
+        diagnostics = build_stationarity_diagnostics(
+            records,
+            args.max_diagnostic_runs,
+            target_n_values=stationarity_n_values,
+        )
         plot_stationarity_examples(diagnostics=diagnostics, output_figure_path=args.stationarity_figure)
         print(f"Figura Cfc(t) guardada en: {args.stationarity_figure.resolve()}")
 

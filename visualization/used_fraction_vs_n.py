@@ -385,6 +385,33 @@ def choose_global_stationary_start(
     return clamped_start, selection_policy
 
 
+def choose_stationary_start_mean_by_n(
+    run_series: Sequence[RunSeries],
+) -> Dict[int, float]:
+    if not run_series:
+        raise ValueError("No hay corridas para elegir t_est promedio por N")
+
+    grouped_detected: Dict[int, List[float]] = {}
+    grouped_max_valid: Dict[int, float] = {}
+
+    for series in run_series:
+        grouped_detected.setdefault(series.n_particles, []).append(series.detected_stationary_start_s)
+        max_valid_start = series.times[-2]
+        current_max_valid = grouped_max_valid.get(series.n_particles)
+        if current_max_valid is None:
+            grouped_max_valid[series.n_particles] = max_valid_start
+        else:
+            grouped_max_valid[series.n_particles] = min(current_max_valid, max_valid_start)
+
+    mean_by_n: Dict[int, float] = {}
+    for n_particles, values in grouped_detected.items():
+        raw_mean = statistics.fmean(values)
+        max_valid_start = grouped_max_valid[n_particles]
+        mean_by_n[n_particles] = max(0.0, min(raw_mean, max_valid_start))
+
+    return mean_by_n
+
+
 def run_single_simulation(
     repo_root: Path,
     run_dir: Path,
@@ -562,29 +589,13 @@ def collect_used_fraction_records(
     if not run_series_list:
         raise ValueError("No se generaron corridas para analizar")
 
-    if args.stationary_mode == "auto":
-        global_stationary_start_s, global_stationary_selection = choose_global_stationary_start(
-            run_series=run_series_list,
-            selection_policy=args.global_stationary_policy,
-        )
-        print(
-            f"[INFO] t_est global elegido automaticamente: {global_stationary_start_s:.6f} s "
-            f"(politica={global_stationary_selection})"
-        )
-    else:
-        global_stationary_start_s = run_series_list[0].detected_stationary_start_s
-        global_stationary_selection = f"{args.stationary_mode}_per_run"
+    global_stationary_selection = f"{args.stationary_mode}_per_run"
 
     records: List[UsedFractionRecord] = []
     for run_series in run_series_list:
-        if args.stationary_mode == "auto":
-            applied_start_time = global_stationary_start_s
-            reported_global_start = global_stationary_start_s
-            reported_global_selection = global_stationary_selection
-        else:
-            applied_start_time = run_series.detected_stationary_start_s
-            reported_global_start = run_series.detected_stationary_start_s
-            reported_global_selection = global_stationary_selection
+        applied_start_time = run_series.detected_stationary_start_s
+        reported_global_start = run_series.detected_stationary_start_s
+        reported_global_selection = global_stationary_selection
 
         record = build_record_from_series(
             series=run_series,
@@ -858,7 +869,50 @@ def plot_stationary_start_vs_n(stats: Sequence[UsedFractionStats], output_figure
 def build_stationarity_diagnostics(
     records: Sequence[UsedFractionRecord],
     max_runs: int,
+    target_n_values: Sequence[int] | None = None,
 ) -> List[Tuple[UsedFractionRecord, List[float], List[float]]]:
+    def resolve_output_path(record: UsedFractionRecord) -> Path | None:
+        primary = record.run_dir / "output.txt"
+        if primary.exists():
+            return primary
+
+        parent = record.run_dir.parent
+        if not parent.exists():
+            return None
+
+        # Fallback for stale CSV entries: use any existing run for the same N in the same benchmark folder.
+        pattern_plain = f"n{record.n_particles}_rep*"
+        pattern_prefixed = f"*_n{record.n_particles}_rep*"
+
+        candidates: List[Path] = []
+        for run_dir in parent.glob(pattern_plain):
+            candidate = run_dir / "output.txt"
+            if candidate.exists():
+                candidates.append(candidate)
+        for run_dir in parent.glob(pattern_prefixed):
+            candidate = run_dir / "output.txt"
+            if candidate.exists():
+                candidates.append(candidate)
+
+        if not candidates:
+            return None
+
+        def rep_key(path: Path) -> int:
+            name = path.parent.name
+            marker = "_rep"
+            if marker not in name:
+                return 10**9
+            tail = name.split(marker, 1)[1]
+            digits = ""
+            for ch in tail:
+                if ch.isdigit():
+                    digits += ch
+                else:
+                    break
+            return int(digits) if digits else 10**9
+
+        return min(candidates, key=rep_key)
+
     worst_by_n: Dict[int, UsedFractionRecord] = {}
 
     for record in records:
@@ -877,14 +931,36 @@ def build_stationarity_diagnostics(
         ):
             worst_by_n[record.n_particles] = record
 
-    selected_records = [worst_by_n[n_particles] for n_particles in sorted(worst_by_n.keys())]
+    selected_records: List[UsedFractionRecord] = []
+    used_n: set[int] = set()
+
+    if target_n_values is not None:
+        for n_particles in target_n_values:
+            record = worst_by_n.get(n_particles)
+            if record is None:
+                print(f"[WARN] No hay corrida disponible para N={n_particles} en stationarity examples.")
+                continue
+            selected_records.append(record)
+            used_n.add(n_particles)
+
+    if len(selected_records) < max_runs:
+        remaining = [
+            worst_by_n[n_particles]
+            for n_particles in sorted(worst_by_n.keys())
+            if n_particles not in used_n
+        ]
+        selected_records.extend(remaining)
+
     selected_records = selected_records[:max_runs]
 
     diagnostics: List[Tuple[UsedFractionRecord, List[float], List[float]]] = []
     for record in selected_records:
-        output_path = record.run_dir / "output.txt"
-        if not output_path.exists():
-            print(f"[WARN] No se encontro {output_path}. Se omite en diagnosticos de estacionario.")
+        output_path = resolve_output_path(record)
+        if output_path is None:
+            print(
+                f"[WARN] No se encontro output.txt para N={record.n_particles} "
+                f"(run original: {record.run_dir}). Se omite en diagnosticos de estacionario."
+            )
             continue
 
         times, fu_values = parse_output_used_fraction_timeseries(output_path)
@@ -914,13 +990,22 @@ def plot_stationarity_examples(
         col = panel_index % cols
         ax = axes[row][col]
 
-        ax.plot(times, fu_values, color="#1f77b4", linewidth=1.8)
-        ax.axvline(record.detected_stationary_start_s, color="#ff7f0e", linestyle="--", linewidth=1.6)
+        fu_line, = ax.plot(times, fu_values, color="#1f77b4", linewidth=1.8, label="Fu(t)")
+        local_line = ax.axvline(
+            record.detected_stationary_start_s,
+            color="#ff7f0e",
+            linestyle="--",
+            linewidth=2.2,
+            label=f"t_est corrida = {record.detected_stationary_start_s:.1f} s",
+        )
 
-        if abs(record.global_stationary_start_s - record.detected_stationary_start_s) > 1.0e-9:
-            ax.axvline(record.global_stationary_start_s, color="#9467bd", linestyle=":", linewidth=1.8)
-
-        ax.axhline(record.f_est, color="#2ca02c", linestyle=":", linewidth=1.6)
+        fest_line = ax.axhline(
+            record.f_est,
+            color="#2ca02c",
+            linestyle=":",
+            linewidth=1.8,
+            label=f"Fest = {record.f_est:.3f}",
+        )
 
         ax.set_title(f"N = {record.n_particles}", fontsize=12, pad=10)
 
@@ -946,6 +1031,47 @@ def build_zoom_overlay_series(
     records: Sequence[UsedFractionRecord],
     target_n_values: Sequence[int],
 ) -> List[Tuple[UsedFractionRecord, List[float], List[float]]]:
+    def resolve_output_path(record: UsedFractionRecord) -> Path | None:
+        primary = record.run_dir / "output.txt"
+        if primary.exists():
+            return primary
+
+        parent = record.run_dir.parent
+        if not parent.exists():
+            return None
+
+        pattern_plain = f"n{record.n_particles}_rep*"
+        pattern_prefixed = f"*_n{record.n_particles}_rep*"
+
+        candidates: List[Path] = []
+        for run_dir in parent.glob(pattern_plain):
+            candidate = run_dir / "output.txt"
+            if candidate.exists():
+                candidates.append(candidate)
+        for run_dir in parent.glob(pattern_prefixed):
+            candidate = run_dir / "output.txt"
+            if candidate.exists():
+                candidates.append(candidate)
+
+        if not candidates:
+            return None
+
+        def rep_key(path: Path) -> int:
+            name = path.parent.name
+            marker = "_rep"
+            if marker not in name:
+                return 10**9
+            tail = name.split(marker, 1)[1]
+            digits = ""
+            for ch in tail:
+                if ch.isdigit():
+                    digits += ch
+                else:
+                    break
+            return int(digits) if digits else 10**9
+
+        return min(candidates, key=rep_key)
+
     records_by_n: Dict[int, List[UsedFractionRecord]] = {}
     for record in records:
         records_by_n.setdefault(record.n_particles, []).append(record)
@@ -958,9 +1084,12 @@ def build_zoom_overlay_series(
             continue
 
         representative = min(candidates, key=lambda item: item.repetition)
-        output_path = representative.run_dir / "output.txt"
-        if not output_path.exists():
-            print(f"[WARN] No se encontro {output_path}. Se omite N={n_particles} en grafico zoom.")
+        output_path = resolve_output_path(representative)
+        if output_path is None:
+            print(
+                f"[WARN] No se encontro output.txt para N={n_particles} "
+                f"(run original: {representative.run_dir}). Se omite en grafico zoom."
+            )
             continue
 
         times, fu_values = parse_output_used_fraction_timeseries(output_path)
@@ -983,17 +1112,31 @@ def plot_zoom_overlay_fu_vs_time(
     fig, ax = plt.subplots(figsize=(12, 8))
 
     common_end = min(times[-1] for _, times, _ in overlay_series)
-    if zoom_time_max is None:
-        auto_span = max(1.0, 0.25 * common_end)
-        effective_t_max = min(common_end, zoom_time_min + auto_span)
-    else:
-        effective_t_max = min(common_end, zoom_time_max)
-
-    if effective_t_max <= zoom_time_min + 1.0e-9:
-        raise ValueError("Ventana de zoom invalida: --zoom-time-max debe ser mayor que --zoom-time-min")
+    effective_t_min = 0.0
+    effective_t_max = common_end
 
     palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
     window_values: List[float] = []
+
+    def collect_values_in_window(times: Sequence[float], values: Sequence[float]) -> List[float]:
+        selected_values = [
+            fu_value
+            for t_value, fu_value in zip(times, values)
+            if effective_t_min <= t_value <= effective_t_max
+        ]
+
+        if selected_values:
+            return selected_values
+
+        # Fallback: if no sample lies strictly inside the window, use nearest endpoint values
+        # so Y limits still adapt to the visible time range instead of defaulting to [0, 1].
+        left_index = first_index_at_or_after(times, effective_t_min)
+        left_index = min(max(0, left_index), len(values) - 1)
+
+        right_index = first_index_at_or_after(times, effective_t_max)
+        right_index = min(max(0, right_index), len(values) - 1)
+
+        return [values[left_index], values[right_index]]
 
     for index, (record, times, fu_values) in enumerate(overlay_series):
         color = palette[index % len(palette)]
@@ -1002,29 +1145,24 @@ def plot_zoom_overlay_fu_vs_time(
             fu_values,
             linewidth=2.0,
             color=color,
-            label=f"N={record.n_particles} rep={record.repetition}",
+            label=f"N={record.n_particles}",
         )
 
-        for t_value, fu_value in zip(times, fu_values):
-            if zoom_time_min <= t_value <= effective_t_max:
-                window_values.append(fu_value)
+        window_values.extend(collect_values_in_window(times, fu_values))
 
-    ax.set_xlim(zoom_time_min, effective_t_max)
+    ax.set_xlim(effective_t_min, effective_t_max)
 
-    if window_values:
-        y_min_data = min(window_values)
-        y_max_data = max(window_values)
-        span = y_max_data - y_min_data
-        pad = 0.02 if span <= 1.0e-12 else max(0.01, 0.15 * span)
-        y_min = max(0.0, y_min_data - pad)
-        y_max = min(1.0, y_max_data + pad)
-        if y_max - y_min < 0.04:
-            y_mid = 0.5 * (y_min + y_max)
-            y_min = max(0.0, y_mid - 0.02)
-            y_max = min(1.0, y_mid + 0.02)
-        ax.set_ylim(y_min, y_max)
-    else:
-        ax.set_ylim(0.0, 1.0)
+    y_min_data = min(window_values)
+    y_max_data = max(window_values)
+    span = y_max_data - y_min_data
+    pad = 0.01 if span <= 1.0e-12 else max(0.005, 0.12 * span)
+    y_min = max(0.0, y_min_data - pad)
+    y_max = min(1.0, y_max_data + pad)
+    if y_max - y_min < 0.03:
+        y_mid = 0.5 * (y_min + y_max)
+        y_min = max(0.0, y_mid - 0.015)
+        y_max = min(1.0, y_mid + 0.015)
+    ax.set_ylim(y_min, y_max)
 
     ax.set_xlabel("Tiempo t (s)")
     ax.set_ylabel("Fraccion usada Fu(t) (-)")
@@ -1162,8 +1300,14 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
     parser.add_argument(
         "--max-diagnostic-runs",
         type=int,
-        default=6,
+        default=7,
         help="Cantidad maxima de corridas mostradas en la figura de estacionario.",
+    )
+    parser.add_argument(
+        "--stationarity-n-values",
+        type=str,
+        default="100,200,300,400,500,600,700",
+        help="Ns priorizados para la figura stationarity examples (separados por coma).",
     )
     parser.add_argument(
         "--skip-stationarity-figure",
@@ -1242,31 +1386,31 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
     parser.add_argument(
         "--auto-mean-tol",
         type=float,
-        default=0.04,
+        default=0.02,
         help="Diferencia maxima permitida respecto al promedio de cola en modo auto.",
     )
     parser.add_argument(
         "--auto-half-mean-diff-tol",
         type=float,
-        default=0.03,
+        default=0.015,
         help="Diferencia maxima entre media de primera y segunda mitad del tramo candidato.",
     )
     parser.add_argument(
         "--auto-start-value-tol",
         type=float,
-        default=0.05,
+        default=0.02,
         help="Diferencia maxima entre Fu(t_inicio) y el nivel medio de cola en modo auto.",
     )
     parser.add_argument(
         "--auto-min-duration-fraction",
         type=float,
-        default=0.20,
+        default=0.30,
         help="Duracion minima de la ventana estacionaria como fraccion de la corrida total.",
     )
     parser.add_argument(
         "--auto-min-points",
         type=int,
-        default=10,
+        default=30,
         help="Cantidad minima de frames para caracterizar estacionario en modo auto.",
     )
 
@@ -1342,7 +1486,10 @@ def main() -> None:
         print(f"CSV guardado en: {args.results_csv.resolve()}")
 
     unique_global_starts = sorted({round(record.global_stationary_start_s, 10) for record in records})
-    if len(unique_global_starts) == 1:
+    selection_mode = records[0].global_stationary_selection
+    if selection_mode.endswith("_per_run"):
+        print(f"t_est usado para Fest: detectado por corrida ({selection_mode})")
+    elif len(unique_global_starts) == 1:
         print(
             "t_est global usado para Fest: "
             f"{unique_global_starts[0]:.6f} s "
@@ -1366,9 +1513,17 @@ def main() -> None:
     print(f"Figura t_est(N) guardada en: {args.stationary_start_figure.resolve()}")
 
     if not args.skip_stationarity_figure:
-        diagnostics = build_stationarity_diagnostics(records, args.max_diagnostic_runs)
-        plot_stationarity_examples(diagnostics=diagnostics, output_figure_path=args.stationarity_figure)
-        print(f"Figura Fu(t) guardada en: {args.stationarity_figure.resolve()}")
+        stationarity_n_values = parse_n_values(args.stationarity_n_values)
+        diagnostics = build_stationarity_diagnostics(
+            records,
+            args.max_diagnostic_runs,
+            target_n_values=stationarity_n_values,
+        )
+        if diagnostics:
+            plot_stationarity_examples(diagnostics=diagnostics, output_figure_path=args.stationarity_figure)
+            print(f"Figura Fu(t) guardada en: {args.stationarity_figure.resolve()}")
+        else:
+            print("[WARN] No se genero stationarity examples por falta de output.txt disponible.")
 
     if not args.skip_zoom_overlay:
         zoom_n_values = parse_n_values(args.zoom_overlay_n_values)
