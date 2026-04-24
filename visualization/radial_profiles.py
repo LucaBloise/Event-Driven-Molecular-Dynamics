@@ -579,7 +579,6 @@ def read_radial_profiles_csv(csv_path: Path) -> List[RadialProfileRun]:
 
     runs.sort(key=lambda run: (run.n_particles, run.repetition))
     return runs
-
 def plot_radial_profiles_per_n(stat: RadialProfileStats, output_path: Path) -> None:
     configure_plot_style()
 
@@ -594,6 +593,12 @@ def plot_radial_profiles_per_n(stat: RadialProfileStats, output_path: Path) -> N
     jin = list(stat.jin_mean)
     jin_std = list(stat.jin_std)
 
+    colors = {
+        "rho": "#1f77b4",
+        "v": "#2ca02c",
+        "jin": "#d62728",
+    }
+
     fig, axes = plt.subplots(3, 1, figsize=(11, 14), sharex=True)
 
     def filter_nonzero(x, y, ystd):
@@ -607,48 +612,45 @@ def plot_radial_profiles_per_n(stat: RadialProfileStats, output_path: Path) -> N
                 filtered_std.append(si)
         return filtered_x, filtered_y, filtered_std
 
-    # 1) Densidad
     s_rho, rho_f, rho_std_f = filter_nonzero(s, rho, rho_std)
     if s_rho:
-        axes[0].plot(s_rho, rho_f, linewidth=2.0, label=r"$\langle \rho_{fin} \rangle(S)$")
+        axes[0].plot(s_rho, rho_f, linewidth=2.0, color=colors["rho"])
         axes[0].fill_between(
             s_rho,
             [max(0.0, m - sd) for m, sd in zip(rho_f, rho_std_f)],
             [m + sd for m, sd in zip(rho_f, rho_std_f)],
             alpha=0.25,
+            color=colors["rho"],
         )
     axes[0].set_ylabel(r"$\langle \rho_{fin} \rangle(S)$")
     axes[0].grid(True, which="major", alpha=0.25)
-    axes[0].legend(loc="best")
 
-    # 2) Velocidad radial
     s_v, v_f, v_std_f = filter_nonzero(s, v_abs, v_std)
     if s_v:
-        axes[1].plot(s_v, v_f, linewidth=2.0, label=r"$|\langle v_{fin} \rangle(S)|$")
+        axes[1].plot(s_v, v_f, linewidth=2.0, color=colors["v"])
         axes[1].fill_between(
             s_v,
             [max(0.0, m - sd) for m, sd in zip(v_f, v_std_f)],
             [m + sd for m, sd in zip(v_f, v_std_f)],
             alpha=0.25,
+            color=colors["v"],
         )
     axes[1].set_ylabel(r"$|\langle v_{fin} \rangle(S)|$")
     axes[1].grid(True, which="major", alpha=0.25)
-    axes[1].legend(loc="best")
 
-    # 3) Flujo
     s_j, jin_f, jin_std_f = filter_nonzero(s, jin, jin_std)
     if s_j:
-        axes[2].plot(s_j, jin_f, linewidth=2.0, label=r"$J_{in}(S)$")
+        axes[2].plot(s_j, jin_f, linewidth=2.0, color=colors["jin"])
         axes[2].fill_between(
             s_j,
             [max(0.0, m - sd) for m, sd in zip(jin_f, jin_std_f)],
             [m + sd for m, sd in zip(jin_f, jin_std_f)],
             alpha=0.25,
+            color=colors["jin"],
         )
     axes[2].set_ylabel(r"$J_{in}(S)$")
     axes[2].set_xlabel("S (m)")
     axes[2].grid(True, which="major", alpha=0.25)
-    axes[2].legend(loc="best")
 
     fig.suptitle(
         f"Perfiles radiales de partículas frescas entrantes, "
@@ -676,6 +678,7 @@ def nearest_bin_index(values: Sequence[float], target: float) -> int:
             best_index = index
 
     return best_index
+
 def plot_s2_vs_n(stats: Sequence[RadialProfileStats], target_s: float, output_path: Path) -> None:
     configure_plot_style()
 
@@ -701,6 +704,12 @@ def plot_s2_vs_n(stats: Sequence[RadialProfileStats], target_s: float, output_pa
         jin_values.append(stat.jin_mean[bin_index])
         jin_stds.append(stat.jin_std[bin_index])
 
+    colors = {
+        "rho": "#1f77b4",
+        "v": "#2ca02c",
+        "jin": "#d62728",
+    }
+
     def filter_nonzero(x, y, yerr):
         filtered_x = []
         filtered_y = []
@@ -714,7 +723,6 @@ def plot_s2_vs_n(stats: Sequence[RadialProfileStats], target_s: float, output_pa
 
     fig, axes = plt.subplots(3, 1, figsize=(11, 14), sharex=True)
 
-    # 1) Densidad
     ns_rho, rho_f, rho_err_f = filter_nonzero(ns, rho_values, rho_stds)
     if ns_rho:
         axes[0].errorbar(
@@ -724,11 +732,12 @@ def plot_s2_vs_n(stats: Sequence[RadialProfileStats], target_s: float, output_pa
             marker="o",
             linewidth=1.8,
             capsize=5,
+            color=colors["rho"],
+            ecolor=colors["rho"],
         )
     axes[0].set_ylabel(r"$\langle \rho_{fin} \rangle$")
     axes[0].grid(True, which="major", alpha=0.25)
 
-    # 2) Velocidad radial
     ns_v, v_f, v_err_f = filter_nonzero(ns, v_values, v_stds)
     if ns_v:
         axes[1].errorbar(
@@ -738,11 +747,12 @@ def plot_s2_vs_n(stats: Sequence[RadialProfileStats], target_s: float, output_pa
             marker="s",
             linewidth=1.8,
             capsize=5,
+            color=colors["v"],
+            ecolor=colors["v"],
         )
     axes[1].set_ylabel(r"$|\langle v_{fin} \rangle|$")
     axes[1].grid(True, which="major", alpha=0.25)
 
-    # 3) Flujo
     ns_j, jin_f, jin_err_f = filter_nonzero(ns, jin_values, jin_stds)
     if ns_j:
         axes[2].errorbar(
@@ -752,6 +762,8 @@ def plot_s2_vs_n(stats: Sequence[RadialProfileStats], target_s: float, output_pa
             marker="^",
             linewidth=1.8,
             capsize=5,
+            color=colors["jin"],
+            ecolor=colors["jin"],
         )
     axes[2].set_ylabel(r"$J_{in}$")
     axes[2].set_xlabel("N")
@@ -809,7 +821,7 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
     parser.add_argument(
         "--n-values",
         type=str,
-        default="50,100,150,200,250,300,400,500",
+        default="50,100,150,200,250",
         help="Lista de N separada por comas.",
     )
     parser.add_argument("--tf", type=float, default=800.0, help="Tiempo absoluto de simulacion en segundos.")
