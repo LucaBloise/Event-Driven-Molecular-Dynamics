@@ -3,7 +3,9 @@ package ar.edu.itba.sds.tp3.simulation;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Random;
 
@@ -12,6 +14,7 @@ public final class EventDrivenSimulation {
     private final Random random;
     private final List<Particle> particles;
     private final PriorityQueue<Event> priorityQueue;
+    private final Map<Long, Event> activePairCollisionEvents;
 
     private double currentTime;
     private long processedEvents;
@@ -22,6 +25,7 @@ public final class EventDrivenSimulation {
         this.random = new Random(config.getSeed());
         this.particles = new ArrayList<>(config.getParticleCount());
         this.priorityQueue = new PriorityQueue<>();
+        this.activePairCollisionEvents = new HashMap<>();
         this.currentTime = 0.0;
         this.processedEvents = 0L;
         this.writtenFrames = 0L;
@@ -32,12 +36,25 @@ public final class EventDrivenSimulation {
         scheduleInitialEvents();
 
         final long startNanos = System.nanoTime();
+        final boolean writeFrames = outputFile != null;
+        final boolean writeDeltaEvents = outputFile != null && config.shouldWriteDeltaOutputEvents();
         double lastWrittenTime = Double.NEGATIVE_INFINITY;
 
-        try (SimulationOutputWriter writer = new SimulationOutputWriter(outputFile)) {
-            writer.writeHeader();
-            writer.writeFrame(writtenFrames++, processedEvents, currentTime, "INITIAL", -1, -1, particles);
-            lastWrittenTime = currentTime;
+        SimulationOutputWriter writer = null;
+        SimulationDeltaOutputWriter deltaWriter = null;
+        try {
+            if (writeFrames && !writeDeltaEvents) {
+                writer = new SimulationOutputWriter(outputFile);
+                writer.writeHeader();
+                writer.writeFrame(writtenFrames++, processedEvents, currentTime, "INITIAL", -1, -1, particles);
+                lastWrittenTime = currentTime;
+            }
+
+            if (writeDeltaEvents) {
+                deltaWriter = new SimulationDeltaOutputWriter(outputFile);
+                deltaWriter.writeHeader();
+                deltaWriter.writeInitialState(particles);
+            }
 
             while (currentTime < config.getEndTime()) {
                 final Event next = pollNextValidEvent();
@@ -59,7 +76,7 @@ public final class EventDrivenSimulation {
                 final ProcessedEvent processedEvent = processEvent(next);
                 processedEvents++;
 
-                if (processedEvents % config.getSnapshotEveryEvents() == 0) {
+                if (writeFrames && !writeDeltaEvents && processedEvents % config.getSnapshotEveryEvents() == 0) {
                     writer.writeFrame(
                             writtenFrames++,
                             processedEvents,
@@ -72,11 +89,33 @@ public final class EventDrivenSimulation {
                     lastWrittenTime = currentTime;
                 }
 
+                if (writeDeltaEvents) {
+                    deltaWriter.writeEvent(
+                            processedEvents,
+                            currentTime,
+                            processedEvent.label,
+                            processedEvent.particleA,
+                            processedEvent.particleB,
+                            processedEvent.changedParticles
+                    );
+                }
+
                 scheduleAfterEvent(processedEvent);
             }
 
-            if (Math.abs(lastWrittenTime - currentTime) > Particle.EPS) {
+            if (writeFrames && !writeDeltaEvents && Math.abs(lastWrittenTime - currentTime) > Particle.EPS) {
                 writer.writeFrame(writtenFrames++, processedEvents, currentTime, "FINAL", -1, -1, particles);
+            }
+
+            if (writeDeltaEvents) {
+                deltaWriter.writeFinal(processedEvents, currentTime);
+            }
+        } finally {
+            if (writer != null) {
+                writer.close();
+            }
+            if (deltaWriter != null) {
+                deltaWriter.close();
             }
         }
 
@@ -149,6 +188,7 @@ public final class EventDrivenSimulation {
 
     private void scheduleInitialEvents() {
         priorityQueue.clear();
+        activePairCollisionEvents.clear();
         for (int i = 0; i < particles.size(); i++) {
             scheduleParticleEvents(i);
         }
@@ -190,7 +230,7 @@ public final class EventDrivenSimulation {
                 continue;
             }
 
-            priorityQueue.add(new Event(
+            schedulePairCollisionEvent(new Event(
                     eventTime,
                     EventType.PARTICLE_COLLISION,
                     particleIndex,
@@ -199,6 +239,18 @@ public final class EventDrivenSimulation {
                     other.getCollisionCount()
             ));
         }
+    }
+
+    private void schedulePairCollisionEvent(final Event candidate) {
+        final long key = pairKey(candidate.getAIndex(), candidate.getBIndex());
+        final Event current = activePairCollisionEvents.get(key);
+
+        if (current != null && current.isValid(particles) && current.getTime() <= candidate.getTime() + Particle.EPS) {
+            return;
+        }
+
+        activePairCollisionEvents.put(key, candidate);
+        priorityQueue.add(candidate);
     }
 
     private void scheduleWallEvent(final double dt, final EventType type, final int particleIndex) {
@@ -225,11 +277,34 @@ public final class EventDrivenSimulation {
     private Event pollNextValidEvent() {
         while (!priorityQueue.isEmpty()) {
             final Event event = priorityQueue.poll();
+            if (event.getType() == EventType.PARTICLE_COLLISION) {
+                final long key = pairKey(event.getAIndex(), event.getBIndex());
+                final Event current = activePairCollisionEvents.get(key);
+
+                if (current != event) {
+                    continue;
+                }
+
+                if (!event.isValid(particles)) {
+                    activePairCollisionEvents.remove(key);
+                    continue;
+                }
+
+                activePairCollisionEvents.remove(key);
+                return event;
+            }
+
             if (event.isValid(particles)) {
                 return event;
             }
         }
         return null;
+    }
+
+    private static long pairKey(final int indexA, final int indexB) {
+        final int min = Math.min(indexA, indexB);
+        final int max = Math.max(indexA, indexB);
+        return ((long) min << 32) | (max & 0xffffffffL);
     }
 
     private ProcessedEvent processEvent(final Event event) {
@@ -249,7 +324,7 @@ public final class EventDrivenSimulation {
         final Particle a = particles.get(aIndex);
         final Particle b = particles.get(bIndex);
         a.bounceOffParticle(b);
-        return new ProcessedEvent("PARTICLE_COLLISION", aIndex, bIndex);
+        return new ProcessedEvent("PARTICLE_COLLISION", aIndex, bIndex, List.of(a, b));
     }
 
     private ProcessedEvent processOuterWallCollision(final int index) {
@@ -261,7 +336,7 @@ public final class EventDrivenSimulation {
             particle.setState(ParticleState.FRESH);
         }
 
-        return new ProcessedEvent("OUTER_WALL_COLLISION", index, -1);
+        return new ProcessedEvent("OUTER_WALL_COLLISION", index, -1, List.of(particle));
     }
 
     private ProcessedEvent processInnerWallCollision(final int index) {
@@ -273,7 +348,7 @@ public final class EventDrivenSimulation {
             particle.setState(ParticleState.USED);
         }
 
-        return new ProcessedEvent("INNER_WALL_COLLISION", index, -1);
+        return new ProcessedEvent("INNER_WALL_COLLISION", index, -1, List.of(particle));
     }
 
     private void advanceAll(double dt) {
@@ -298,11 +373,18 @@ public final class EventDrivenSimulation {
         private final String label;
         private final int particleA;
         private final int particleB;
+        private final List<Particle> changedParticles;
 
-        private ProcessedEvent(final String label, final int particleA, final int particleB) {
+        private ProcessedEvent(
+                final String label,
+                final int particleA,
+                final int particleB,
+                final List<Particle> changedParticles
+        ) {
             this.label = label;
             this.particleA = particleA;
             this.particleB = particleB;
+            this.changedParticles = changedParticles;
         }
     }
 }

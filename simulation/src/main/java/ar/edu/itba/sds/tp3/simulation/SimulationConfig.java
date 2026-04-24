@@ -26,6 +26,8 @@ public final class SimulationConfig {
     private final String outputBaseDirectory;
     private final String outputDirectory;
     private final String runName;
+    private final boolean writeOutputFrames;
+    private final boolean writeDeltaOutputEvents;
 
     private SimulationConfig(
             final int particleCount,
@@ -40,7 +42,9 @@ public final class SimulationConfig {
             final int maxPlacementAttemptsPerParticle,
             final String outputBaseDirectory,
             final String outputDirectory,
-            final String runName
+                final String runName,
+                final boolean writeOutputFrames,
+                final boolean writeDeltaOutputEvents
     ) {
         this.particleCount = particleCount;
         this.endTime = endTime;
@@ -55,6 +59,8 @@ public final class SimulationConfig {
         this.outputBaseDirectory = outputBaseDirectory;
         this.outputDirectory = outputDirectory;
         this.runName = runName;
+        this.writeOutputFrames = writeOutputFrames;
+        this.writeDeltaOutputEvents = writeDeltaOutputEvents;
     }
 
     public static SimulationConfig fromArgs(final String[] args) {
@@ -73,6 +79,19 @@ public final class SimulationConfig {
         final String outputBaseDirectory = options.getOrDefault("output-base-dir", "simulation/outputs");
         final String outputDirectory = options.get("output-dir");
         final String runName = options.get("run-name");
+        final boolean noOutput = parseBoolean(options, "no-output", false);
+
+        if (options.containsKey("full-output")) {
+            throw new IllegalArgumentException("--full-output is no longer supported. Only delta output mode is allowed");
+        }
+
+        final boolean deltaOutput = parseBoolean(options, "delta-output", true);
+        if (!deltaOutput && !noOutput) {
+            throw new IllegalArgumentException("--delta-output=false is not supported. Only delta output mode is allowed");
+        }
+
+        final boolean writeOutputFrames = false;
+        final boolean writeDeltaOutputEvents = !noOutput;
 
         final SimulationConfig config = new SimulationConfig(
                 particleCount,
@@ -87,7 +106,9 @@ public final class SimulationConfig {
                 maxPlacementAttemptsPerParticle,
                 outputBaseDirectory,
                 outputDirectory,
-                runName
+                runName,
+                writeOutputFrames,
+                writeDeltaOutputEvents
         );
         config.validate();
         return config;
@@ -117,11 +138,13 @@ public final class SimulationConfig {
         System.out.println("  --mass=<double>                Mobile particle mass in kg (default: 1.0)");
         System.out.println("  --speed=<double>               Initial speed modulus in m/s (default: 1.0)");
         System.out.println("  --seed=<long>                  RNG seed (default: current time)");
-        System.out.println("  --snapshot-every=<int>         Write state every K events (default: 1)");
+        System.out.println("  --snapshot-every=<int>         Ignored in delta/no-output modes (kept for backward compatibility)");
         System.out.println("  --max-placement-attempts=<int> Max random placement retries per particle (default: 10000)");
         System.out.println("  --output-base-dir=<path>       Base directory for generated runs (default: simulation/outputs)");
         System.out.println("  --output-dir=<path>            Exact run directory path (overrides output-base-dir/run-name)");
         System.out.println("  --run-name=<name>              Run folder name when output-dir is not provided");
+        System.out.println("  --no-output                    Disable output.txt writing (for runtime benchmarks)");
+        System.out.println("  --delta-output=<bool>          Delta mode selector (must be true; default: true)");
         System.out.println("  --help, -h                     Print this message");
     }
 
@@ -175,6 +198,14 @@ public final class SimulationConfig {
 
     public String getRunName() {
         return runName;
+    }
+
+    public boolean shouldWriteOutputFrames() {
+        return writeOutputFrames;
+    }
+
+    public boolean shouldWriteDeltaOutputEvents() {
+        return writeDeltaOutputEvents;
     }
 
     public double getOuterCollisionRadius() {
@@ -233,6 +264,9 @@ public final class SimulationConfig {
         }
         if (maxPlacementAttemptsPerParticle <= 0) {
             throw new IllegalArgumentException("--max-placement-attempts must be > 0");
+        }
+        if (writeOutputFrames && writeDeltaOutputEvents) {
+            throw new IllegalArgumentException("Invalid output mode: full frames and delta events cannot both be enabled");
         }
 
         final double inner = getInnerCollisionRadius();
@@ -294,5 +328,12 @@ public final class SimulationConfig {
             return fallback;
         }
         return Double.parseDouble(options.get(key));
+    }
+
+    private static boolean parseBoolean(final Map<String, String> options, final String key, final boolean fallback) {
+        if (!options.containsKey(key)) {
+            return fallback;
+        }
+        return Boolean.parseBoolean(options.get(key));
     }
 }

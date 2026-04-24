@@ -22,8 +22,8 @@ public final class SimulationPropertiesWriter {
     ) throws IOException {
         final Map<String, String> values = new LinkedHashMap<>();
         values.put("format_version", "1");
-        values.put("output_format", "frame-particle-v1");
-        values.put("output_file", outputFile.getFileName().toString());
+        values.put("output_format", config.shouldWriteDeltaOutputEvents() ? "event-delta-v1" : "none");
+        values.put("output_file", outputFile != null ? outputFile.getFileName().toString() : "none");
 
         values.put("n_particles", Integer.toString(config.getParticleCount()));
         values.put("tf_seconds", format(config.getEndTime()));
@@ -36,6 +36,8 @@ public final class SimulationPropertiesWriter {
         values.put("outer_collision_radius_m", format(config.getOuterCollisionRadius()));
         values.put("seed", Long.toString(config.getSeed()));
         values.put("snapshot_every_events", Integer.toString(config.getSnapshotEveryEvents()));
+        values.put("write_output_frames", "false");
+        values.put("write_delta_output_events", Boolean.toString(config.shouldWriteDeltaOutputEvents()));
         values.put("max_placement_attempts_per_particle", Integer.toString(config.getMaxPlacementAttemptsPerParticle()));
 
         values.put("final_simulated_time_s", format(result.getFinalSimulatedTime()));

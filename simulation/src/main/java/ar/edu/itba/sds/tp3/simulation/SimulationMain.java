@@ -14,7 +14,9 @@ public final class SimulationMain {
         try {
             final SimulationConfig config = SimulationConfig.fromArgs(args);
             final Path runDirectory = config.resolveRunDirectory();
-            final Path outputFile = runDirectory.resolve("output.txt");
+            final Path outputFile = config.shouldWriteDeltaOutputEvents()
+                    ? runDirectory.resolve("output.txt")
+                    : null;
             final Path propertiesFile = runDirectory.resolve("properties.txt");
 
             final EventDrivenSimulation simulation = new EventDrivenSimulation(config);
@@ -24,7 +26,11 @@ public final class SimulationMain {
 
             System.out.println("Simulation finished successfully.");
             System.out.println("Run directory: " + runDirectory.toAbsolutePath());
-            System.out.println("Output file: " + outputFile.toAbsolutePath());
+            if (outputFile != null) {
+                System.out.println("Output file: " + outputFile.toAbsolutePath() + " (mode: delta)");
+            } else {
+                System.out.println("Output file: <disabled by --no-output>");
+            }
             System.out.println("Properties file: " + propertiesFile.toAbsolutePath());
             System.out.printf(Locale.US, "Processed events: %d%n", result.getProcessedEvents());
             System.out.printf(Locale.US, "Written frames: %d%n", result.getWrittenFrames());

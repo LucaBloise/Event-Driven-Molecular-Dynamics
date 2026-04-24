@@ -114,10 +114,10 @@ def parse_output_used_fraction_timeseries(output_path: Path) -> Tuple[List[float
     times: List[float] = []
     fu_values: List[float] = []
 
-    frame_time: float | None = None
-    frame_particle_count = 0
-    frame_used_count = 0
-    expected_particle_count: int | None = None
+    particle_states: Dict[int, str] = {}
+    used_count = 0
+    current_event_time: float | None = None
+    current_event_changes: Dict[int, str] = {}
 
     with output_path.open("r", encoding="utf-8") as handle:
         for line_number, raw_line in enumerate(handle, start=1):
@@ -128,47 +128,68 @@ def parse_output_used_fraction_timeseries(output_path: Path) -> Tuple[List[float
             tokens = line.split()
             record_type = tokens[0]
 
-            if record_type == "FRAME":
-                if len(tokens) < 7:
-                    raise ValueError(f"Linea FRAME invalida en {output_path}:{line_number}")
-                frame_time = float(tokens[3])
-                frame_particle_count = 0
-                frame_used_count = 0
+            if record_type == "BEGIN_INITIAL_STATE":
+                continue
 
-            elif record_type == "PARTICLE":
-                if frame_time is None:
-                    raise ValueError(f"PARTICLE fuera de FRAME en {output_path}:{line_number}")
-                if len(tokens) < 7:
-                    raise ValueError(f"Linea PARTICLE invalida en {output_path}:{line_number}")
-
+            if record_type == "INITIAL_PARTICLE":
+                if len(tokens) < 10:
+                    raise ValueError(f"Linea INITIAL_PARTICLE invalida en {output_path}:{line_number}")
+                particle_id = int(tokens[1])
                 state = tokens[6]
-                frame_particle_count += 1
+                particle_states[particle_id] = state
                 if state == "USED":
-                    frame_used_count += 1
+                    used_count += 1
+                continue
 
-            elif record_type == "END_FRAME":
-                if frame_time is None:
-                    raise ValueError(f"END_FRAME fuera de FRAME en {output_path}:{line_number}")
-                if frame_particle_count <= 0:
-                    raise ValueError(f"FRAME sin particulas en {output_path}:{line_number}")
+            if record_type == "END_INITIAL_STATE":
+                if not particle_states:
+                    raise ValueError(f"Estado inicial vacio en {output_path}:{line_number}")
+                times.append(0.0)
+                fu_values.append(used_count / len(particle_states))
+                continue
 
-                if expected_particle_count is None:
-                    expected_particle_count = frame_particle_count
-                elif frame_particle_count != expected_particle_count:
-                    raise ValueError(
-                        "Cantidad de particulas inconsistente entre frames en "
-                        f"{output_path}:{line_number}"
-                    )
+            if record_type == "EVENT":
+                if len(tokens) != 6:
+                    raise ValueError(f"Linea EVENT invalida en {output_path}:{line_number}")
+                current_event_time = float(tokens[2])
+                current_event_changes = {}
+                continue
 
-                times.append(frame_time)
-                fu_values.append(frame_used_count / expected_particle_count)
+            if record_type == "CHANGED_PARTICLE":
+                if current_event_time is None:
+                    raise ValueError(f"CHANGED_PARTICLE fuera de EVENT en {output_path}:{line_number}")
+                if len(tokens) < 10:
+                    raise ValueError(f"Linea CHANGED_PARTICLE invalida en {output_path}:{line_number}")
+                particle_id = int(tokens[1])
+                current_event_changes[particle_id] = tokens[6]
+                continue
 
-                frame_time = None
-                frame_particle_count = 0
-                frame_used_count = 0
+            if record_type == "END_EVENT":
+                if current_event_time is None:
+                    raise ValueError(f"END_EVENT fuera de EVENT en {output_path}:{line_number}")
+                for particle_id, new_state in current_event_changes.items():
+                    old_state = particle_states.get(particle_id)
+                    if old_state is None:
+                        raise ValueError(
+                            f"Particula {particle_id} no definida en estado inicial ({output_path}:{line_number})"
+                        )
+                    if old_state != "USED" and new_state == "USED":
+                        used_count += 1
+                    elif old_state == "USED" and new_state != "USED":
+                        used_count -= 1
+                    particle_states[particle_id] = new_state
+
+                times.append(current_event_time)
+                fu_values.append(used_count / len(particle_states))
+                current_event_time = None
+                current_event_changes = {}
+                continue
+
+            if record_type == "FINAL":
+                continue
 
     if len(times) < 2:
-        raise ValueError(f"No hay suficientes frames para reconstruir Fu(t) en {output_path}")
+        raise ValueError(f"No hay suficientes eventos para reconstruir Fu(t) en {output_path}")
 
     for index in range(1, len(times)):
         if times[index] + 1.0e-12 < times[index - 1]:
@@ -195,6 +216,29 @@ def auto_stationary_start_index(
     if total_points < 4:
         return 0, "auto_too_few_points"
 
+    # Prefix sums make the window statistics below O(1) per candidate start.
+    prefix_sum: List[float] = [0.0] * (total_points + 1)
+    prefix_sum_sq: List[float] = [0.0] * (total_points + 1)
+    for idx, value in enumerate(fu_values):
+        prefix_sum[idx + 1] = prefix_sum[idx] + value
+        prefix_sum_sq[idx + 1] = prefix_sum_sq[idx] + value * value
+
+    def mean_range(start: int, end: int) -> float:
+        count = end - start
+        if count <= 0:
+            return 0.0
+        return (prefix_sum[end] - prefix_sum[start]) / count
+
+    def std_range(start: int, end: int) -> float:
+        count = end - start
+        if count <= 1:
+            return 0.0
+        total = prefix_sum[end] - prefix_sum[start]
+        total_sq = prefix_sum_sq[end] - prefix_sum_sq[start]
+        mean = total / count
+        variance = (total_sq - count * mean * mean) / (count - 1)
+        return math.sqrt(max(0.0, variance))
+
     total_duration = times[-1] - times[0]
     if total_duration <= 1.0e-12:
         return 0, "auto_zero_duration"
@@ -204,9 +248,8 @@ def auto_stationary_start_index(
     tail_start_index = first_index_at_or_after(times, tail_start_time)
     tail_start_index = min(tail_start_index, total_points - 2)
 
-    tail_values = fu_values[tail_start_index:]
-    tail_mean = statistics.fmean(tail_values)
-    tail_std = statistics.stdev(tail_values) if len(tail_values) > 1 else 0.0
+    tail_mean = mean_range(tail_start_index, total_points)
+    tail_std = std_range(tail_start_index, total_points)
 
     effective_mean_tol = max(mean_tol, 1.5 * tail_std)
     effective_half_mean_diff_tol = max(half_mean_diff_tol, 2.0 * tail_std)
@@ -231,17 +274,17 @@ def auto_stationary_start_index(
         if segment_duration < required_duration:
             continue
 
-        segment_values = fu_values[start_index:]
-        segment_mean = statistics.fmean(segment_values)
+        segment_mean = mean_range(start_index, total_points)
         mean_diff = abs(segment_mean - tail_mean)
-        start_value_diff = abs(segment_values[0] - tail_mean)
+        start_value_diff = abs(fu_values[start_index] - tail_mean)
 
-        split_index = len(segment_values) // 2
-        if split_index <= 0 or split_index >= len(segment_values):
+        split_index = segment_points // 2
+        if split_index <= 0 or split_index >= segment_points:
             continue
 
-        first_half_mean = statistics.fmean(segment_values[:split_index])
-        second_half_mean = statistics.fmean(segment_values[split_index:])
+        split_abs = start_index + split_index
+        first_half_mean = mean_range(start_index, split_abs)
+        second_half_mean = mean_range(split_abs, total_points)
         half_mean_diff = abs(second_half_mean - first_half_mean)
 
         mean_score = mean_diff / max(effective_mean_tol, 1.0e-12)
@@ -446,12 +489,19 @@ def collect_used_fraction_records(
 ) -> List[UsedFractionRecord]:
     outputs_base_dir.mkdir(parents=True, exist_ok=True)
 
+    run_prefix = run_prefix.strip()
+
+    def run_dir_for(n_particles: int, repetition: int) -> Path:
+        if run_prefix:
+            return outputs_base_dir / f"{run_prefix}_n{n_particles}_rep{repetition}"
+        return outputs_base_dir / f"n{n_particles}_rep{repetition}"
+
     run_series_list: List[RunSeries] = []
 
     for n_particles in n_values:
         for repetition in range(1, repetitions + 1):
             seed = seed_base + n_particles * 1000 + repetition
-            run_dir = outputs_base_dir / f"{run_prefix}_n{n_particles}_rep{repetition}"
+            run_dir = run_dir_for(n_particles, repetition)
 
             if reuse_existing_runs:
                 if not run_dir.exists():
@@ -469,11 +519,11 @@ def collect_used_fraction_records(
                     )
 
                 properties = parse_properties(properties_path)
-                written_stride = int(properties.get("snapshot_every_events", str(snapshot_every)))
-                if written_stride != 1:
+                output_format = properties.get("output_format", "")
+                if output_format != "event-delta-v1":
                     raise ValueError(
-                        "Para reconstruir Fu(t) correctamente, snapshot_every_events debe ser 1. "
-                        f"Se encontro {written_stride} en {properties_path}"
+                        f"Formato no soportado en {properties_path}: output_format={output_format!r}. "
+                        "Se requiere event-delta-v1"
                     )
                 seed = int(properties.get("seed", str(seed)))
             else:
@@ -892,6 +942,102 @@ def plot_stationarity_examples(
     plt.close(fig)
 
 
+def build_zoom_overlay_series(
+    records: Sequence[UsedFractionRecord],
+    target_n_values: Sequence[int],
+) -> List[Tuple[UsedFractionRecord, List[float], List[float]]]:
+    records_by_n: Dict[int, List[UsedFractionRecord]] = {}
+    for record in records:
+        records_by_n.setdefault(record.n_particles, []).append(record)
+
+    selected: List[Tuple[UsedFractionRecord, List[float], List[float]]] = []
+    for n_particles in target_n_values:
+        candidates = records_by_n.get(n_particles)
+        if not candidates:
+            print(f"[WARN] No hay corridas para N={n_particles} en el CSV/resultados actuales.")
+            continue
+
+        representative = min(candidates, key=lambda item: item.repetition)
+        output_path = representative.run_dir / "output.txt"
+        if not output_path.exists():
+            print(f"[WARN] No se encontro {output_path}. Se omite N={n_particles} en grafico zoom.")
+            continue
+
+        times, fu_values = parse_output_used_fraction_timeseries(output_path)
+        selected.append((representative, times, fu_values))
+
+    return selected
+
+
+def plot_zoom_overlay_fu_vs_time(
+    overlay_series: Sequence[Tuple[UsedFractionRecord, List[float], List[float]]],
+    output_figure_path: Path,
+    zoom_time_min: float,
+    zoom_time_max: float | None,
+) -> None:
+    if not overlay_series:
+        print("[WARN] No hay series para graficar overlay Fu(t) con zoom.")
+        return
+
+    configure_plot_style()
+    fig, ax = plt.subplots(figsize=(12, 8))
+
+    common_end = min(times[-1] for _, times, _ in overlay_series)
+    if zoom_time_max is None:
+        auto_span = max(1.0, 0.25 * common_end)
+        effective_t_max = min(common_end, zoom_time_min + auto_span)
+    else:
+        effective_t_max = min(common_end, zoom_time_max)
+
+    if effective_t_max <= zoom_time_min + 1.0e-9:
+        raise ValueError("Ventana de zoom invalida: --zoom-time-max debe ser mayor que --zoom-time-min")
+
+    palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+    window_values: List[float] = []
+
+    for index, (record, times, fu_values) in enumerate(overlay_series):
+        color = palette[index % len(palette)]
+        ax.plot(
+            times,
+            fu_values,
+            linewidth=2.0,
+            color=color,
+            label=f"N={record.n_particles} rep={record.repetition}",
+        )
+
+        for t_value, fu_value in zip(times, fu_values):
+            if zoom_time_min <= t_value <= effective_t_max:
+                window_values.append(fu_value)
+
+    ax.set_xlim(zoom_time_min, effective_t_max)
+
+    if window_values:
+        y_min_data = min(window_values)
+        y_max_data = max(window_values)
+        span = y_max_data - y_min_data
+        pad = 0.02 if span <= 1.0e-12 else max(0.01, 0.15 * span)
+        y_min = max(0.0, y_min_data - pad)
+        y_max = min(1.0, y_max_data + pad)
+        if y_max - y_min < 0.04:
+            y_mid = 0.5 * (y_min + y_max)
+            y_min = max(0.0, y_mid - 0.02)
+            y_max = min(1.0, y_mid + 0.02)
+        ax.set_ylim(y_min, y_max)
+    else:
+        ax.set_ylim(0.0, 1.0)
+
+    ax.set_xlabel("Tiempo t (s)")
+    ax.set_ylabel("Fraccion usada Fu(t) (-)")
+    ax.grid(True, which="major", alpha=0.25)
+    ax.legend(loc="best", fontsize=13)
+
+    fig.subplots_adjust(left=0.12, right=0.98, top=0.96, bottom=0.12)
+
+    output_figure_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_figure_path, dpi=180)
+    plt.close(fig)
+
+
 def write_stationary_summary(records: Sequence[UsedFractionRecord], summary_path: Path) -> None:
     if not records:
         return
@@ -971,14 +1117,14 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
     parser.add_argument(
         "--outputs-base-dir",
         type=Path,
-        default=repo_root / "simulation" / "outputs" / "benchmark_1_3",
-        help="Carpeta base para corridas de benchmark 1.3.",
+        default=repo_root / "simulation" / "outputs" / "benchmark",
+        help="Carpeta base para corridas benchmark generadas por run_simulations.py.",
     )
     parser.add_argument(
         "--run-prefix",
         type=str,
-        default="tp3_1_3",
-        help="Prefijo de nombre de carpeta para cada corrida.",
+        default="",
+        help="Prefijo opcional de corrida (default: sin prefijo, nN_repR).",
     )
     parser.add_argument(
         "--reuse-existing-runs",
@@ -988,6 +1134,7 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
             "con nombres <run-prefix>_nN_repR y reconstruye Fu(t) desde output.txt."
         ),
     )
+    parser.set_defaults(reuse_existing_runs=True)
     parser.add_argument(
         "--results-csv",
         type=Path,
@@ -1022,6 +1169,35 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
         "--skip-stationarity-figure",
         action="store_true",
         help="No genera la figura de ejemplos Fu(t) para justificar estacionario.",
+    )
+    parser.add_argument(
+        "--zoom-overlay-figure",
+        type=Path,
+        default=repo_root / "visualization" / "out" / "used_fraction_time_zoom_overlay.png",
+        help="Figura Fu(t) con zoom temporal y multiples N en un mismo panel.",
+    )
+    parser.add_argument(
+        "--zoom-overlay-n-values",
+        type=str,
+        default="100,300,500,700",
+        help="Ns para superponer en figura zoom (separados por coma).",
+    )
+    parser.add_argument(
+        "--zoom-time-min",
+        type=float,
+        default=0.0,
+        help="Inicio de ventana temporal para la figura zoom.",
+    )
+    parser.add_argument(
+        "--zoom-time-max",
+        type=float,
+        default=None,
+        help="Fin de ventana temporal para la figura zoom (default: automatico).",
+    )
+    parser.add_argument(
+        "--skip-zoom-overlay",
+        action="store_true",
+        help="No genera la figura Fu(t) con overlay de N seleccionados.",
     )
     parser.add_argument(
         "--stationary-summary",
@@ -1128,6 +1304,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--auto-min-duration-fraction debe estar en (0, 1)")
     if args.auto_min_points < 4:
         raise ValueError("--auto-min-points debe ser >= 4")
+    if args.zoom_time_min < 0.0:
+        raise ValueError("--zoom-time-min debe ser >= 0")
+    if args.zoom_time_max is not None and args.zoom_time_max <= args.zoom_time_min:
+        raise ValueError("--zoom-time-max debe ser mayor que --zoom-time-min")
 
     if not args.only_plot and args.snapshot_every != 1:
         raise ValueError(
@@ -1189,6 +1369,17 @@ def main() -> None:
         diagnostics = build_stationarity_diagnostics(records, args.max_diagnostic_runs)
         plot_stationarity_examples(diagnostics=diagnostics, output_figure_path=args.stationarity_figure)
         print(f"Figura Fu(t) guardada en: {args.stationarity_figure.resolve()}")
+
+    if not args.skip_zoom_overlay:
+        zoom_n_values = parse_n_values(args.zoom_overlay_n_values)
+        overlay_series = build_zoom_overlay_series(records, zoom_n_values)
+        plot_zoom_overlay_fu_vs_time(
+            overlay_series=overlay_series,
+            output_figure_path=args.zoom_overlay_figure,
+            zoom_time_min=args.zoom_time_min,
+            zoom_time_max=args.zoom_time_max,
+        )
+        print(f"Figura Fu(t) zoom overlay guardada en: {args.zoom_overlay_figure.resolve()}")
 
 
 if __name__ == "__main__":

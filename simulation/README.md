@@ -64,9 +64,18 @@ Useful options:
 - `--tf`
 - `--seed`
 - `--snapshot-every`
+- `--delta-output=<bool>` (debe ser true; modo normal de simulacion)
+- `--no-output` (desactiva `output.txt`, util para benchmarks de runtime)
 - `--output-base-dir`
 - `--output-dir`
 - `--run-name`
+
+Modo de salida:
+- Modo normal: formato compacto por evento (`event-delta-v1`).
+- Excepcion para benchmark: `--no-output` (sin `output.txt`).
+
+Nota:
+- Las herramientas de visualizacion que parsean frames completos (`frame-particle-v1`) deben adaptarse a `event-delta-v1` o reconstruir frames.
 
 For full options:
 
@@ -96,16 +105,21 @@ Inside each run folder:
 
 ## `output.txt` format
 
-Header comments describe the format. Snapshot blocks are:
+Header comments describe the format. Delta blocks are:
 
 ```text
-FRAME <frame_index> <event_index> <time_s> <event_type> <particle_a> <particle_b>
-PARTICLE <id> <x_m> <y_m> <vx_m_s> <vy_m_s> <state> <color_r> <color_g> <color_b>
+BEGIN_INITIAL_STATE
+INITIAL_PARTICLE <id> <x_m> <y_m> <vx_m_s> <vy_m_s> <state> <color_r> <color_g> <color_b>
 ...
-END_FRAME
-```
+END_INITIAL_STATE
 
-There is always an `INITIAL` frame at `t=0` and a final frame at the simulation end time.
+EVENT <event_index> <time_s> <event_type> <particle_a> <particle_b>
+CHANGED_PARTICLE <id> <x_m> <y_m> <vx_m_s> <vy_m_s> <state> <color_r> <color_g> <color_b>
+...
+END_EVENT
+
+FINAL <event_index> <time_s>
+```
 
 ## `properties.txt` format
 

@@ -160,9 +160,9 @@ def parse_output_cfc_timeseries(output_path: Path) -> Tuple[List[float], List[in
     times: List[float] = []
     cfc_values: List[int] = []
 
-    previous_states: Dict[int, str] | None = None
-    frame_time: float | None = None
-    frame_states: Dict[int, str] = {}
+    particle_states: Dict[int, str] = {}
+    current_event_time: float | None = None
+    current_event_changes: Dict[int, str] = {}
     cumulative_cfc = 0
 
     with output_path.open("r", encoding="utf-8") as handle:
@@ -174,43 +174,66 @@ def parse_output_cfc_timeseries(output_path: Path) -> Tuple[List[float], List[in
             tokens = line.split()
             record_type = tokens[0]
 
-            if record_type == "FRAME":
-                if len(tokens) < 7:
-                    raise ValueError(f"Linea FRAME invalida en {output_path}:{line_number}")
-                frame_time = float(tokens[3])
-                frame_states = {}
+            if record_type == "BEGIN_INITIAL_STATE":
+                continue
 
-            elif record_type == "PARTICLE":
-                if frame_time is None:
-                    raise ValueError(f"PARTICLE fuera de FRAME en {output_path}:{line_number}")
-                if len(tokens) < 7:
-                    raise ValueError(f"Linea PARTICLE invalida en {output_path}:{line_number}")
-
+            if record_type == "INITIAL_PARTICLE":
+                if len(tokens) < 10:
+                    raise ValueError(f"Linea INITIAL_PARTICLE invalida en {output_path}:{line_number}")
                 particle_id = int(tokens[1])
-                state = tokens[6]
-                frame_states[particle_id] = state
+                particle_states[particle_id] = tokens[6]
+                continue
 
-            elif record_type == "END_FRAME":
-                if frame_time is None:
-                    raise ValueError(f"END_FRAME fuera de FRAME en {output_path}:{line_number}")
+            if record_type == "END_INITIAL_STATE":
+                if not particle_states:
+                    raise ValueError(f"Estado inicial vacio en {output_path}:{line_number}")
+                times.append(0.0)
+                cfc_values.append(0)
+                continue
 
-                if previous_states is not None:
-                    fresh_to_used = 0
-                    for particle_id, current_state in frame_states.items():
-                        old_state = previous_states.get(particle_id)
-                        if old_state == "FRESH" and current_state == "USED":
-                            fresh_to_used += 1
-                    cumulative_cfc += fresh_to_used
+            if record_type == "EVENT":
+                if len(tokens) != 6:
+                    raise ValueError(f"Linea EVENT invalida en {output_path}:{line_number}")
+                current_event_time = float(tokens[2])
+                current_event_changes = {}
+                continue
 
-                times.append(frame_time)
+            if record_type == "CHANGED_PARTICLE":
+                if current_event_time is None:
+                    raise ValueError(f"CHANGED_PARTICLE fuera de EVENT en {output_path}:{line_number}")
+                if len(tokens) < 10:
+                    raise ValueError(f"Linea CHANGED_PARTICLE invalida en {output_path}:{line_number}")
+                particle_id = int(tokens[1])
+                current_event_changes[particle_id] = tokens[6]
+                continue
+
+            if record_type == "END_EVENT":
+                if current_event_time is None:
+                    raise ValueError(f"END_EVENT fuera de EVENT en {output_path}:{line_number}")
+
+                fresh_to_used = 0
+                for particle_id, new_state in current_event_changes.items():
+                    old_state = particle_states.get(particle_id)
+                    if old_state is None:
+                        raise ValueError(
+                            f"Particula {particle_id} no definida en estado inicial ({output_path}:{line_number})"
+                        )
+                    if old_state == "FRESH" and new_state == "USED":
+                        fresh_to_used += 1
+                    particle_states[particle_id] = new_state
+
+                cumulative_cfc += fresh_to_used
+                times.append(current_event_time)
                 cfc_values.append(cumulative_cfc)
+                current_event_time = None
+                current_event_changes = {}
+                continue
 
-                previous_states = frame_states
-                frame_time = None
-                frame_states = {}
+            if record_type == "FINAL":
+                continue
 
     if len(times) < 2:
-        raise ValueError(f"No hay suficientes frames para reconstruir Cfc(t) en {output_path}")
+        raise ValueError(f"No hay suficientes eventos para reconstruir Cfc(t) en {output_path}")
 
     for index in range(1, len(times)):
         if times[index] + 1.0e-12 < times[index - 1]:
@@ -458,12 +481,19 @@ def collect_scanning_records(
 ) -> List[ScanningRecord]:
     outputs_base_dir.mkdir(parents=True, exist_ok=True)
 
+    run_prefix = run_prefix.strip()
+
+    def run_dir_for(n_particles: int, repetition: int) -> Path:
+        if run_prefix:
+            return outputs_base_dir / f"{run_prefix}_n{n_particles}_rep{repetition}"
+        return outputs_base_dir / f"n{n_particles}_rep{repetition}"
+
     run_series_list: List[RunSeries] = []
 
     for n_particles in n_values:
         for repetition in range(1, repetitions + 1):
             seed = seed_base + n_particles * 1000 + repetition
-            run_dir = outputs_base_dir / f"{run_prefix}_n{n_particles}_rep{repetition}"
+            run_dir = run_dir_for(n_particles, repetition)
 
             if reuse_existing_runs:
                 if not run_dir.exists():
@@ -481,11 +511,11 @@ def collect_scanning_records(
                     )
 
                 properties = parse_properties(properties_path)
-                written_stride = int(properties.get("snapshot_every_events", str(snapshot_every)))
-                if written_stride != 1:
+                output_format = properties.get("output_format", "")
+                if output_format != "event-delta-v1":
                     raise ValueError(
-                        "Para reconstruir Cfc(t) correctamente, snapshot_every_events debe ser 1. "
-                        f"Se encontro {written_stride} en {properties_path}"
+                        f"Formato no soportado en {properties_path}: output_format={output_format!r}. "
+                        "Se requiere event-delta-v1"
                     )
                 seed = int(properties.get("seed", str(seed)))
             else:
@@ -960,14 +990,14 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
     parser.add_argument(
         "--outputs-base-dir",
         type=Path,
-        default=repo_root / "simulation" / "outputs" / "benchmark_1_2",
-        help="Carpeta base para corridas de benchmark 1.2.",
+        default=repo_root / "simulation" / "outputs" / "benchmark",
+        help="Carpeta base para corridas benchmark generadas por run_simulations.py.",
     )
     parser.add_argument(
         "--run-prefix",
         type=str,
-        default="tp3_1_2",
-        help="Prefijo de nombre de carpeta para cada corrida.",
+        default="",
+        help="Prefijo opcional de corrida (default: sin prefijo, nN_repR).",
     )
     parser.add_argument(
         "--reuse-existing-runs",
@@ -977,6 +1007,7 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
             "con nombres <run-prefix>_nN_repR y reconstruye Cfc(t) desde output.txt."
         ),
     )
+    parser.set_defaults(reuse_existing_runs=True)
     parser.add_argument(
         "--results-csv",
         type=Path,

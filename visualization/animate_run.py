@@ -57,13 +57,68 @@ def parse_properties(properties_path: Path) -> Dict[str, str]:
 def parse_output(output_path: Path) -> List[FrameRecord]:
     frames: List[FrameRecord] = []
 
-    current_frame_index: int | None = None
+    current_state: Dict[int, ParticleRecord] = {}
+    in_initial_state = False
+
     current_event_index: int | None = None
-    current_time_s: float | None = None
+    current_event_time: float | None = None
     current_event_type: str | None = None
     current_particle_a: int | None = None
     current_particle_b: int | None = None
-    current_particles: List[ParticleRecord] = []
+    current_changed: Dict[int, ParticleRecord] = {}
+
+    final_event_index: int | None = None
+    final_time: float | None = None
+    previous_time = 0.0
+
+    def parse_particle(tokens: List[str], line: str, label: str) -> ParticleRecord:
+        if len(tokens) != 10:
+            raise ValueError(f"Invalid {label} record: {line}")
+        return ParticleRecord(
+            particle_id=int(tokens[1]),
+            x=float(tokens[2]),
+            y=float(tokens[3]),
+            vx=float(tokens[4]),
+            vy=float(tokens[5]),
+            state=tokens[6],
+            color_rgb=(int(tokens[7]), int(tokens[8]), int(tokens[9])),
+        )
+
+    def snapshot_from_state(
+        frame_index: int,
+        event_index: int,
+        time_s: float,
+        event_type: str,
+        particle_a: int,
+        particle_b: int,
+    ) -> FrameRecord:
+        ordered_particles = tuple(current_state[key] for key in sorted(current_state.keys()))
+        return FrameRecord(
+            frame_index=frame_index,
+            event_index=event_index,
+            time_s=time_s,
+            event_type=event_type,
+            particle_a=particle_a,
+            particle_b=particle_b,
+            particles=ordered_particles,
+        )
+
+    def advance_state(dt: float) -> None:
+        if dt < -1.0e-12:
+            raise ValueError(f"Time series is not monotonic in {output_path}")
+        if dt < 0.0:
+            dt = 0.0
+
+        for particle_id, particle in list(current_state.items()):
+            current_state[particle_id] = ParticleRecord(
+                particle_id=particle.particle_id,
+                x=particle.x + particle.vx * dt,
+                y=particle.y + particle.vy * dt,
+                vx=particle.vx,
+                vy=particle.vy,
+                state=particle.state,
+                color_rgb=particle.color_rgb,
+            )
 
     with output_path.open("r", encoding="utf-8") as handle:
         for raw_line in handle:
@@ -74,76 +129,124 @@ def parse_output(output_path: Path) -> List[FrameRecord]:
             tokens = line.split()
             record_type = tokens[0]
 
-            if record_type == "FRAME":
-                if current_frame_index is not None:
-                    raise ValueError("Found FRAME before END_FRAME in output file.")
-
-                if len(tokens) != 7:
-                    raise ValueError(f"Invalid FRAME record: {line}")
-
-                current_frame_index = int(tokens[1])
-                current_event_index = int(tokens[2])
-                current_time_s = float(tokens[3])
-                current_event_type = tokens[4]
-                current_particle_a = int(tokens[5])
-                current_particle_b = int(tokens[6])
-                current_particles = []
+            if record_type == "BEGIN_INITIAL_STATE":
+                if in_initial_state:
+                    raise ValueError("Nested BEGIN_INITIAL_STATE blocks are not allowed.")
+                if current_state:
+                    raise ValueError("BEGIN_INITIAL_STATE found more than once.")
+                in_initial_state = True
                 continue
 
-            if record_type == "PARTICLE":
-                if current_frame_index is None:
-                    raise ValueError("Found PARTICLE record outside a FRAME block.")
-                if len(tokens) != 10:
-                    raise ValueError(f"Invalid PARTICLE record: {line}")
-
-                particle = ParticleRecord(
-                    particle_id=int(tokens[1]),
-                    x=float(tokens[2]),
-                    y=float(tokens[3]),
-                    vx=float(tokens[4]),
-                    vy=float(tokens[5]),
-                    state=tokens[6],
-                    color_rgb=(int(tokens[7]), int(tokens[8]), int(tokens[9])),
-                )
-                current_particles.append(particle)
+            if record_type == "INITIAL_PARTICLE":
+                if not in_initial_state:
+                    raise ValueError("Found INITIAL_PARTICLE outside initial state block.")
+                particle = parse_particle(tokens, line, "INITIAL_PARTICLE")
+                current_state[particle.particle_id] = particle
                 continue
 
-            if record_type == "END_FRAME":
-                if current_frame_index is None:
-                    raise ValueError("Found END_FRAME without an open FRAME block.")
+            if record_type == "END_INITIAL_STATE":
+                if not in_initial_state:
+                    raise ValueError("Found END_INITIAL_STATE without BEGIN_INITIAL_STATE.")
+                in_initial_state = False
+                if not current_state:
+                    raise ValueError("Initial state block is empty.")
+                frames.append(snapshot_from_state(0, 0, 0.0, "INITIAL", -1, -1))
+                previous_time = 0.0
+                continue
 
-                frame = FrameRecord(
-                    frame_index=current_frame_index,
-                    event_index=current_event_index if current_event_index is not None else -1,
-                    time_s=current_time_s if current_time_s is not None else 0.0,
-                    event_type=current_event_type if current_event_type is not None else "UNKNOWN",
-                    particle_a=current_particle_a if current_particle_a is not None else -1,
-                    particle_b=current_particle_b if current_particle_b is not None else -1,
-                    particles=tuple(current_particles),
+            if record_type == "EVENT":
+                if in_initial_state:
+                    raise ValueError("Found EVENT inside initial state block.")
+                if not current_state:
+                    raise ValueError("Found EVENT before initial state was defined.")
+                if current_event_index is not None:
+                    raise ValueError("Found EVENT before END_EVENT in output file.")
+                if len(tokens) != 6:
+                    raise ValueError(f"Invalid EVENT record: {line}")
+
+                current_event_index = int(tokens[1])
+                current_event_time = float(tokens[2])
+                current_event_type = tokens[3]
+                current_particle_a = int(tokens[4])
+                current_particle_b = int(tokens[5])
+                current_changed = {}
+                continue
+
+            if record_type == "CHANGED_PARTICLE":
+                if current_event_index is None:
+                    raise ValueError("Found CHANGED_PARTICLE outside an EVENT block.")
+                particle = parse_particle(tokens, line, "CHANGED_PARTICLE")
+                current_changed[particle.particle_id] = particle
+                continue
+
+            if record_type == "END_EVENT":
+                if current_event_index is None:
+                    raise ValueError("Found END_EVENT without an open EVENT block.")
+
+                event_time = current_event_time if current_event_time is not None else previous_time
+                advance_state(event_time - previous_time)
+
+                for pid, particle in current_changed.items():
+                    if pid not in current_state:
+                        raise ValueError(f"Changed particle id {pid} was not present in initial state.")
+                    current_state[pid] = particle
+
+                frames.append(
+                    snapshot_from_state(
+                        frame_index=len(frames),
+                        event_index=current_event_index,
+                        time_s=event_time,
+                        event_type=current_event_type if current_event_type is not None else "UNKNOWN",
+                        particle_a=current_particle_a if current_particle_a is not None else -1,
+                        particle_b=current_particle_b if current_particle_b is not None else -1,
+                    )
                 )
-                frames.append(frame)
 
-                current_frame_index = None
+                previous_time = event_time
                 current_event_index = None
-                current_time_s = None
+                current_event_time = None
                 current_event_type = None
                 current_particle_a = None
                 current_particle_b = None
-                current_particles = []
+                current_changed = {}
+                continue
+
+            if record_type == "FINAL":
+                if len(tokens) != 3:
+                    raise ValueError(f"Invalid FINAL record: {line}")
+                final_event_index = int(tokens[1])
+                final_time = float(tokens[2])
                 continue
 
             raise ValueError(f"Unknown record type in output file: {record_type}")
 
-    if current_frame_index is not None:
-        raise ValueError("Output file ended with an unfinished FRAME block.")
+    if in_initial_state:
+        raise ValueError("Output file ended with an unfinished initial state block.")
+    if current_event_index is not None:
+        raise ValueError("Output file ended with an unfinished EVENT block.")
     if not frames:
-        raise ValueError("No frames were found in output file.")
+        raise ValueError("No frames were reconstructed from output file.")
+
+    if final_time is not None:
+        last = frames[-1]
+        if abs(last.time_s - final_time) > 1.0e-12:
+            advance_state(final_time - previous_time)
+            frames.append(
+                snapshot_from_state(
+                    frame_index=len(frames),
+                    event_index=final_event_index if final_event_index is not None else last.event_index,
+                    time_s=final_time,
+                    event_type="FINAL",
+                    particle_a=-1,
+                    particle_b=-1,
+                )
+            )
 
     expected_particles = len(frames[0].particles)
     for idx, frame in enumerate(frames):
         if len(frame.particles) != expected_particles:
             raise ValueError(
-                "Inconsistent particle count between frames. "
+                "Inconsistent particle count between reconstructed frames. "
                 f"Frame {idx} has {len(frame.particles)} particles, expected {expected_particles}."
             )
 
@@ -273,6 +376,7 @@ def resolve_writer(output_path: Path, fps: int):
         fps=fps,
         codec="libx264",
         bitrate=3000,
+        extra_args=["-pix_fmt", "yuv420p", "-movflags", "+faststart"],
         metadata={"artist": "Event-Driven-Molecular-Dynamics"},
     )
 
@@ -415,6 +519,12 @@ def build_animation(
         raise FileNotFoundError(f"No se encontro output.txt en: {run_dir}")
 
     properties = parse_properties(properties_path)
+    output_format = properties.get("output_format", "")
+    if output_format != "event-delta-v1":
+        raise ValueError(
+            "animate_run.py soporta solo formato delta (event-delta-v1). "
+            f"Se encontro output_format={output_format!r} en {properties_path}."
+        )
     frames = parse_output(output_path)
 
     selected_frames = frames[::max(1, frame_step)]
@@ -494,7 +604,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Genera una animacion de una corrida del simulador event-driven. "
-            "La animacion se construye desde output.txt y properties.txt."
+            "La animacion se construye desde output.txt y properties.txt en formato delta."
         )
     )
     parser.add_argument(

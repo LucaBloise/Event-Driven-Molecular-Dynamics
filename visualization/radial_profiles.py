@@ -140,11 +140,47 @@ def parse_output_radial_profiles(
     total_sum_vr = [0.0 for _ in range(n_bins)]
     frame_count = 0
 
-    frame_active = False
-    frame_time = None
-    frame_is_usable = False
-    frame_counts = [0 for _ in range(n_bins)]
-    frame_sum_vr = [0.0 for _ in range(n_bins)]
+    particle_state: Dict[int, Tuple[float, float, float, float, str]] = {}
+
+    current_event_time: float | None = None
+    current_changed_particles: List[Tuple[int, float, float, float, float, str]] = []
+
+    def apply_event_and_accumulate(event_time: float) -> None:
+        nonlocal frame_count
+
+        if event_time < stationary_start_time:
+            for pid, x, y, vx, vy, state in current_changed_particles:
+                particle_state[pid] = (x, y, vx, vy, state)
+            return
+
+        frame_counts = [0 for _ in range(n_bins)]
+        frame_sum_vr = [0.0 for _ in range(n_bins)]
+
+        for pid, x, y, vx, vy, state in current_changed_particles:
+            particle_state[pid] = (x, y, vx, vy, state)
+
+        for x, y, vx, vy, state in particle_state.values():
+            if state != "FRESH":
+                continue
+
+            r = math.hypot(x, y)
+            if r < r0 or r >= r_max:
+                continue
+
+            dot = x * vx + y * vy
+            if dot >= 0.0:
+                continue
+
+            vr = dot / r
+            bin_index = int(math.floor((r - r0) / ds))
+            if 0 <= bin_index < n_bins:
+                frame_counts[bin_index] += 1
+                frame_sum_vr[bin_index] += vr
+
+        for k in range(n_bins):
+            total_counts[k] += frame_counts[k]
+            total_sum_vr[k] += frame_sum_vr[k]
+        frame_count += 1
 
     with output_path.open("r", encoding="utf-8") as handle:
         for line_number, raw_line in enumerate(handle, start=1):
@@ -155,63 +191,57 @@ def parse_output_radial_profiles(
             tokens = line.split()
             record_type = tokens[0]
 
-            if record_type == "FRAME":
-                if len(tokens) < 7:
-                    raise ValueError(f"Linea FRAME invalida en {output_path}:{line_number}")
+            if record_type == "BEGIN_INITIAL_STATE":
+                continue
 
-                frame_time = float(tokens[3])
-                frame_is_usable = frame_time >= stationary_start_time
-                frame_active = True
-                frame_counts = [0 for _ in range(n_bins)]
-                frame_sum_vr = [0.0 for _ in range(n_bins)]
-
-            elif record_type == "PARTICLE":
-                if not frame_active:
-                    raise ValueError(f"PARTICLE fuera de FRAME en {output_path}:{line_number}")
-
+            if record_type == "INITIAL_PARTICLE":
                 if len(tokens) < 10:
-                    raise ValueError(f"Linea PARTICLE invalida en {output_path}:{line_number}")
-
-                if not frame_is_usable:
-                    continue
-
+                    raise ValueError(f"Linea INITIAL_PARTICLE invalida en {output_path}:{line_number}")
+                pid = int(tokens[1])
                 x = float(tokens[2])
                 y = float(tokens[3])
                 vx = float(tokens[4])
                 vy = float(tokens[5])
                 state = tokens[6]
+                particle_state[pid] = (x, y, vx, vy, state)
+                continue
 
-                if state != "FRESH":
-                    continue
+            if record_type == "END_INITIAL_STATE":
+                if not particle_state:
+                    raise ValueError(f"Estado inicial vacio en {output_path}:{line_number}")
+                continue
 
-                r = math.hypot(x, y)
-                if r < r0 or r >= r_max:
-                    continue
+            if record_type == "EVENT":
+                if len(tokens) != 6:
+                    raise ValueError(f"Linea EVENT invalida en {output_path}:{line_number}")
+                current_event_time = float(tokens[2])
+                current_changed_particles = []
+                continue
 
-                dot = x * vx + y * vy
-                if dot >= 0.0:
-                    continue
+            if record_type == "CHANGED_PARTICLE":
+                if current_event_time is None:
+                    raise ValueError(f"CHANGED_PARTICLE fuera de EVENT en {output_path}:{line_number}")
+                if len(tokens) < 10:
+                    raise ValueError(f"Linea CHANGED_PARTICLE invalida en {output_path}:{line_number}")
+                pid = int(tokens[1])
+                x = float(tokens[2])
+                y = float(tokens[3])
+                vx = float(tokens[4])
+                vy = float(tokens[5])
+                state = tokens[6]
+                current_changed_particles.append((pid, x, y, vx, vy, state))
+                continue
 
-                vr = dot / r
+            if record_type == "END_EVENT":
+                if current_event_time is None:
+                    raise ValueError(f"END_EVENT fuera de EVENT en {output_path}:{line_number}")
+                apply_event_and_accumulate(current_event_time)
+                current_event_time = None
+                current_changed_particles = []
+                continue
 
-                bin_index = int(math.floor((r - r0) / ds))
-                if 0 <= bin_index < n_bins:
-                    frame_counts[bin_index] += 1
-                    frame_sum_vr[bin_index] += vr
-
-            elif record_type == "END_FRAME":
-                if not frame_active:
-                    raise ValueError(f"END_FRAME fuera de FRAME en {output_path}:{line_number}")
-
-                if frame_is_usable:
-                    for k in range(n_bins):
-                        total_counts[k] += frame_counts[k]
-                        total_sum_vr[k] += frame_sum_vr[k]
-                    frame_count += 1
-
-                frame_active = False
-                frame_time = None
-                frame_is_usable = False
+            if record_type == "FINAL":
+                continue
 
     if frame_count <= 0:
         raise ValueError(
@@ -288,12 +318,19 @@ def collect_radial_profile_runs(
 ) -> List[RadialProfileRun]:
     outputs_base_dir.mkdir(parents=True, exist_ok=True)
 
+    run_prefix = run_prefix.strip()
+
+    def run_dir_for(n_particles: int, repetition: int) -> Path:
+        if run_prefix:
+            return outputs_base_dir / f"{run_prefix}_n{n_particles}_rep{repetition}"
+        return outputs_base_dir / f"n{n_particles}_rep{repetition}"
+
     runs: List[RadialProfileRun] = []
 
     for n_particles in n_values:
         for repetition in range(1, repetitions + 1):
             seed = seed_base + n_particles * 1000 + repetition
-            run_dir = outputs_base_dir / f"{run_prefix}_n{n_particles}_rep{repetition}"
+            run_dir = run_dir_for(n_particles, repetition)
 
             if reuse_existing_runs:
                 if not run_dir.exists():
@@ -311,6 +348,12 @@ def collect_radial_profile_runs(
                     )
 
                 properties = parse_properties(properties_path)
+                output_format = properties.get("output_format", "")
+                if output_format != "event-delta-v1":
+                    raise ValueError(
+                        f"Formato no soportado en {properties_path}: output_format={output_format!r}. "
+                        "Se requiere event-delta-v1"
+                    )
                 seed = int(properties.get("seed", str(seed)))
             else:
                 run_single_simulation(
@@ -792,14 +835,14 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
     parser.add_argument(
         "--outputs-base-dir",
         type=Path,
-        default=repo_root / "simulation" / "outputs" / "benchmark_1_4",
-        help="Carpeta base para corridas de benchmark 1.4.",
+        default=repo_root / "simulation" / "outputs" / "benchmark",
+        help="Carpeta base para corridas benchmark generadas por run_simulations.py.",
     )
     parser.add_argument(
         "--run-prefix",
         type=str,
-        default="tp3_1_4",
-        help="Prefijo de nombre de carpeta para cada corrida.",
+        default="",
+        help="Prefijo opcional de corrida (default: sin prefijo, nN_repR).",
     )
     parser.add_argument(
         "--reuse-existing-runs",
@@ -809,6 +852,7 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
             "con nombres <run-prefix>_nN_repR y reconstruye perfiles desde output.txt."
         ),
     )
+    parser.set_defaults(reuse_existing_runs=True)
     parser.add_argument(
         "--results-csv",
         type=Path,
