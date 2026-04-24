@@ -78,6 +78,7 @@ def run_single_simulation(
     tf_seconds: float,
     seed: int,
     snapshot_every: int,
+    no_output: bool,
 ) -> RuntimeRecord:
     common_args = [
         f"--n={n_particles}",
@@ -86,6 +87,8 @@ def run_single_simulation(
         f"--snapshot-every={snapshot_every}",
         f"--output-dir={run_dir}",
     ]
+    if no_output:
+        common_args.append("--no-output")
 
     if os.name == "nt":
         run_script = repo_root / "simulation" / "run.bat"
@@ -143,6 +146,7 @@ def collect_runtime_records(
     tf_seconds: float,
     seed_base: int,
     snapshot_every: int,
+    no_output: bool,
     outputs_base_dir: Path,
     run_prefix: str,
 ) -> List[RuntimeRecord]:
@@ -161,6 +165,7 @@ def collect_runtime_records(
                 tf_seconds=tf_seconds,
                 seed=seed,
                 snapshot_every=snapshot_every,
+                no_output=no_output,
             )
 
             records.append(
@@ -241,6 +246,7 @@ def aggregate_stats(records: Sequence[RuntimeRecord]) -> List[RuntimeStats]:
 def plot_runtime_vs_n(
     stats: Sequence[RuntimeStats],
     output_figure_path: Path,
+    log_y: bool = False,
 ) -> None:
     ns = [s.n_particles for s in stats]
     means = [s.mean_s for s in stats]
@@ -270,10 +276,8 @@ def plot_runtime_vs_n(
             linewidth=1.8,
             color="#1f77b4",
             ecolor="#1f77b4",
-            label="Promedio y desvio estandar",
         )
         ax.plot(ns, means, color="#1f77b4", alpha=0.75, linewidth=1.2)
-        ax.legend(loc="upper left", fontsize=14)
     else:
         ax.plot(
             ns,
@@ -284,9 +288,12 @@ def plot_runtime_vs_n(
             color="#1f77b4",
         )
 
-    ax.set_xlabel("Numero de particulas N (-)")
-    ax.set_ylabel("Tiempo de ejecucion (s)")
+    ax.set_xlabel("Número de partículas N", fontsize=22)
+    ax.set_ylabel("Tiempo de ejecución (s)", fontsize=22)
     ax.set_xticks(ns)
+    ax.tick_params(axis="both", which="major", labelsize=18)
+    if log_y:
+        ax.set_yscale("log")
     ax.grid(True, which="major", alpha=0.25)
 
     fig.subplots_adjust(left=0.12, right=0.98, top=0.97, bottom=0.11)
@@ -319,6 +326,11 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
         default=1,
         help="Frecuencia de guardado del simulador Java (cada K eventos).",
     )
+    parser.add_argument(
+        "--with-output",
+        action="store_true",
+        help="Genera output.txt en cada corrida (por defecto runtime benchmark usa --no-output).",
+    )
 
     parser.add_argument(
         "--outputs-base-dir",
@@ -343,6 +355,12 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
         type=Path,
         default=repo_root / "visualization" / "out" / "runtime_vs_n.png",
         help="Figura final runtime vs N.",
+    )
+    parser.add_argument(
+        "--figure-log-y",
+        type=Path,
+        default=repo_root / "visualization" / "out" / "runtime_vs_n_logy.png",
+        help="Figura adicional runtime vs N con escala logaritmica en eje Y.",
     )
     parser.add_argument(
         "--only-plot",
@@ -377,6 +395,7 @@ def main() -> None:
             tf_seconds=args.tf,
             seed_base=args.seed_base,
             snapshot_every=args.snapshot_every,
+            no_output=not args.with_output,
             outputs_base_dir=args.outputs_base_dir,
             run_prefix=args.run_prefix,
         )
@@ -389,6 +408,13 @@ def main() -> None:
         output_figure_path=args.figure,
     )
     print(f"Figura guardada en: {args.figure.resolve()}")
+
+    plot_runtime_vs_n(
+        stats=stats,
+        output_figure_path=args.figure_log_y,
+        log_y=True,
+    )
+    print(f"Figura (eje Y log) guardada en: {args.figure_log_y.resolve()}")
 
 
 if __name__ == "__main__":

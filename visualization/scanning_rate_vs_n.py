@@ -732,10 +732,8 @@ def plot_scanning_rate_vs_n(stats: Sequence[ScanningStats], output_figure_path: 
             linewidth=1.8,
             color="#1f77b4",
             ecolor="#1f77b4",
-            label="Promedio y desvio estandar",
         )
         ax.plot(ns, means, color="#1f77b4", alpha=0.75, linewidth=1.2)
-        ax.legend(loc="upper left", fontsize=14)
     else:
         ax.plot(
             ns,
@@ -746,9 +744,10 @@ def plot_scanning_rate_vs_n(stats: Sequence[ScanningStats], output_figure_path: 
             color="#1f77b4",
         )
 
-    ax.set_xlabel("Numero de particulas N (-)")
-    ax.set_ylabel("Scanning rate J (1/s)")
+    ax.set_xlabel("Número de partículas N", fontsize=22)
+    ax.set_ylabel("Scanning rate $J$ (1/s)", fontsize=22)
     ax.set_xticks(ns)
+    ax.tick_params(axis="both", which="major", labelsize=18)
     ax.grid(True, which="major", alpha=0.25)
 
     fig.subplots_adjust(left=0.14, right=0.98, top=0.97, bottom=0.12)
@@ -778,10 +777,8 @@ def plot_stationary_start_vs_n(stats: Sequence[ScanningStats], output_figure_pat
             linewidth=1.8,
             color="#2ca02c",
             ecolor="#2ca02c",
-            label="Promedio y desvio estandar",
         )
         ax.plot(ns, means, color="#2ca02c", alpha=0.75, linewidth=1.2)
-        ax.legend(loc="upper left", fontsize=14)
     else:
         ax.plot(
             ns,
@@ -792,9 +789,10 @@ def plot_stationary_start_vs_n(stats: Sequence[ScanningStats], output_figure_pat
             color="#2ca02c",
         )
 
-    ax.set_xlabel("Numero de particulas N (-)")
-    ax.set_ylabel("Inicio estacionario t_est (s)")
+    ax.set_xlabel("Número de partículas N", fontsize=22)
+    ax.set_ylabel("Inicio estacionario $t_{est}$ (s)", fontsize=22)
     ax.set_xticks(ns)
+    ax.tick_params(axis="both", which="major", labelsize=18)
     ax.grid(True, which="major", alpha=0.25)
 
     fig.subplots_adjust(left=0.14, right=0.98, top=0.97, bottom=0.12)
@@ -917,10 +915,11 @@ def plot_stationarity_examples(
         if legend_handles is None:
             legend_handles = (cfc_line, fit_line)
 
-        ax.set_title(f"N = {record.n_particles}", fontsize=12, pad=10)
+        ax.set_title(f"N = {record.n_particles}", fontsize=18, pad=10)
 
-        ax.set_xlabel("Tiempo t (s)")
-        ax.set_ylabel("Cfc(t) (-)")
+        ax.set_xlabel("Tiempo $t$ (s)", fontsize=22)
+        ax.set_ylabel("$C_{fc}(t)$", fontsize=22)
+        ax.tick_params(axis="both", which="major", labelsize=18)
         ax.set_ylim(0.0, global_y_max)
         ax.grid(True, which="major", alpha=0.25)
 

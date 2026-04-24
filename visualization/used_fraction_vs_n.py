@@ -767,10 +767,8 @@ def plot_fest_vs_n(stats: Sequence[UsedFractionStats], output_figure_path: Path)
             linewidth=1.8,
             color="#1f77b4",
             ecolor="#1f77b4",
-            label="Promedio y desvio estandar",
         )
         ax.plot(ns, means, color="#1f77b4", alpha=0.75, linewidth=1.2)
-        ax.legend(loc="lower right", fontsize=14)
     else:
         ax.plot(
             ns,
@@ -781,9 +779,10 @@ def plot_fest_vs_n(stats: Sequence[UsedFractionStats], output_figure_path: Path)
             color="#1f77b4",
         )
 
-    ax.set_xlabel("Numero de particulas N (-)")
-    ax.set_ylabel("Fraccion estacionaria Fest (-)")
+    ax.set_xlabel("Número de partículas N", fontsize=22)
+    ax.set_ylabel("Fracción de partículas usadas $F_{est}$", fontsize=22)
     ax.set_xticks(ns)
+    ax.tick_params(axis="both", which="major", labelsize=18)
 
     # Auto-zoom del eje Y usando valores y barras de error, acotado al rango fisico [0, 1].
     lower_candidates = [max(0.0, mean - std) for mean, std in zip(means, stds)]
@@ -840,10 +839,8 @@ def plot_stationary_start_vs_n(stats: Sequence[UsedFractionStats], output_figure
             linewidth=1.8,
             color="#2ca02c",
             ecolor="#2ca02c",
-            label="Promedio y desvio estandar",
         )
         ax.plot(ns, means, color="#2ca02c", alpha=0.75, linewidth=1.2)
-        ax.legend(loc="upper left", fontsize=14)
     else:
         ax.plot(
             ns,
@@ -854,9 +851,10 @@ def plot_stationary_start_vs_n(stats: Sequence[UsedFractionStats], output_figure
             color="#2ca02c",
         )
 
-    ax.set_xlabel("Numero de particulas N (-)")
-    ax.set_ylabel("Inicio estacionario t_est (s)")
+    ax.set_xlabel("Número de partículas N", fontsize=22)
+    ax.set_ylabel("Inicio estacionario $t_{est}$ (s)", fontsize=22)
     ax.set_xticks(ns)
+    ax.tick_params(axis="both", which="major", labelsize=18)
     ax.grid(True, which="major", alpha=0.25)
 
     fig.subplots_adjust(left=0.14, right=0.98, top=0.97, bottom=0.12)
@@ -1007,10 +1005,11 @@ def plot_stationarity_examples(
             label=f"Fest = {record.f_est:.3f}",
         )
 
-        ax.set_title(f"N = {record.n_particles}", fontsize=12, pad=10)
+        ax.set_title(f"N = {record.n_particles}", fontsize=18, pad=10)
 
-        ax.set_xlabel("Tiempo t (s)")
-        ax.set_ylabel("Fu(t) (-)")
+        ax.set_xlabel("Tiempo $t$ (s)", fontsize=22)
+        ax.set_ylabel("$F_u(t)$", fontsize=22)
+        ax.tick_params(axis="both", which="major", labelsize=18)
         ax.set_ylim(0.0, 1.02)
         ax.grid(True, which="major", alpha=0.25)
 
@@ -1164,8 +1163,9 @@ def plot_zoom_overlay_fu_vs_time(
         y_max = min(1.0, y_mid + 0.015)
     ax.set_ylim(y_min, y_max)
 
-    ax.set_xlabel("Tiempo t (s)")
-    ax.set_ylabel("Fraccion usada Fu(t) (-)")
+    ax.set_xlabel("Tiempo $t$ (s)", fontsize=22)
+    ax.set_ylabel("Fracción de partículas usadas $F_u(t)$", fontsize=22)
+    ax.tick_params(axis="both", which="major", labelsize=18)
     ax.grid(True, which="major", alpha=0.25)
     ax.legend(loc="best", fontsize=13)
 

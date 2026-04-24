@@ -19,16 +19,17 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 
 from radial_profiles import (
+    RadialProfileStats,
     RadialProfileRun,
     aggregate_radial_profile_stats,
     build_radial_bins,
+    nearest_bin_index,
     parse_n_values,
     parse_properties,
-    plot_radial_profiles_per_n,
-    plot_s2_vs_n,
     read_radial_profiles_csv,
     run_single_simulation,
     write_radial_profiles_csv,
@@ -36,6 +37,220 @@ from radial_profiles import (
 )
 
 PARTICLE_RADIUS_M = 1.0
+
+
+def configure_plot_style_v2() -> None:
+    plt.rcParams.update(
+        {
+            "font.family": "DejaVu Sans",
+            "font.size": 20,
+            "axes.labelsize": 22,
+            "xtick.labelsize": 20,
+            "ytick.labelsize": 20,
+            "legend.fontsize": 20,
+            "axes.titlesize": 22,
+        }
+    )
+
+
+def plot_radial_profiles_per_n_v2(stat: RadialProfileStats, output_path: Path) -> None:
+    configure_plot_style_v2()
+
+    s = list(stat.s_centers)
+    rho = list(stat.rho_mean)
+    rho_std = list(stat.rho_std)
+    v_abs = [abs(value) for value in stat.v_mean]
+    v_std = list(stat.v_std)
+    jin = list(stat.jin_mean)
+    jin_std = list(stat.jin_std)
+
+    colors = {
+        "rho": "#1f77b4",
+        "v": "#2ca02c",
+        "jin": "#d62728",
+    }
+
+    fig, axes = plt.subplots(3, 1, figsize=(12, 16), sharex=True)
+
+    def filter_nonzero(x, y, ystd):
+        filtered_x = []
+        filtered_y = []
+        filtered_std = []
+        for xi, yi, si in zip(x, y, ystd):
+            if abs(yi) > 0.001:
+                filtered_x.append(xi)
+                filtered_y.append(yi)
+                filtered_std.append(si)
+        return filtered_x, filtered_y, filtered_std
+
+    s_rho, rho_f, rho_std_f = filter_nonzero(s, rho, rho_std)
+    if s_rho:
+        axes[0].plot(s_rho, rho_f, linewidth=2.2, color=colors["rho"])
+        axes[0].fill_between(
+            s_rho,
+            [max(0.0, m - sd) for m, sd in zip(rho_f, rho_std_f)],
+            [m + sd for m, sd in zip(rho_f, rho_std_f)],
+            alpha=0.25,
+            color=colors["rho"],
+        )
+    axes[0].set_ylabel(
+        "Densidad de partículas\nfrescas entrantes\n$\\langle \\rho_f^{in} \\rangle$ (1/m²)",
+        labelpad=18,
+    )
+    axes[0].yaxis.set_label_coords(-0.23, 0.5)
+    axes[0].grid(True, which="major", alpha=0.25)
+
+    s_v, v_f, v_std_f = filter_nonzero(s, v_abs, v_std)
+    if s_v:
+        axes[1].plot(s_v, v_f, linewidth=2.2, color=colors["v"])
+        axes[1].fill_between(
+            s_v,
+            [max(0.0, m - sd) for m, sd in zip(v_f, v_std_f)],
+            [m + sd for m, sd in zip(v_f, v_std_f)],
+            alpha=0.25,
+            color=colors["v"],
+        )
+    axes[1].set_ylabel(
+        "Velocidad radial entrante\npromedio\n$|\\langle v_f^{in} \\rangle|$ (m/s)",
+        labelpad=18,
+    )
+    axes[1].yaxis.set_label_coords(-0.23, 0.5)
+    axes[1].grid(True, which="major", alpha=0.25)
+
+    s_j, jin_f, jin_std_f = filter_nonzero(s, jin, jin_std)
+    if s_j:
+        axes[2].plot(s_j, jin_f, linewidth=2.2, color=colors["jin"])
+        axes[2].fill_between(
+            s_j,
+            [max(0.0, m - sd) for m, sd in zip(jin_f, jin_std_f)],
+            [m + sd for m, sd in zip(jin_f, jin_std_f)],
+            alpha=0.25,
+            color=colors["jin"],
+        )
+    axes[2].set_ylabel(
+        "Flujo entrante\n$J_{in} = \\langle \\rho_f^{in} \\rangle |\\langle v_f^{in} \\rangle|$\n(1/(m·s))",
+        labelpad=18,
+    )
+    axes[2].yaxis.set_label_coords(-0.23, 0.5)
+    axes[2].set_xlabel("Distancia radial S (m)")
+    axes[2].grid(True, which="major", alpha=0.25)
+
+    fig.suptitle(
+        f"Perfiles radiales de particulas frescas entrantes, N={stat.n_particles}",
+        y=0.995,
+    )
+
+    fig.subplots_adjust(left=0.33, right=0.98, top=0.95, bottom=0.09, hspace=0.34)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
+def plot_s2_vs_n_v2(stats: Sequence[RadialProfileStats], target_s: float, output_path: Path) -> None:
+    configure_plot_style_v2()
+
+    ns: List[int] = []
+    rho_values: List[float] = []
+    rho_stds: List[float] = []
+    v_values: List[float] = []
+    v_stds: List[float] = []
+    jin_values: List[float] = []
+    jin_stds: List[float] = []
+
+    for stat in stats:
+        bin_index = nearest_bin_index(stat.s_centers, target_s)
+        ns.append(stat.n_particles)
+        rho_values.append(stat.rho_mean[bin_index])
+        rho_stds.append(stat.rho_std[bin_index])
+        v_values.append(abs(stat.v_mean[bin_index]))
+        v_stds.append(stat.v_std[bin_index])
+        jin_values.append(stat.jin_mean[bin_index])
+        jin_stds.append(stat.jin_std[bin_index])
+
+    colors = {
+        "rho": "#1f77b4",
+        "v": "#2ca02c",
+        "jin": "#d62728",
+    }
+
+    def filter_nonzero(x, y, yerr):
+        filtered_x = []
+        filtered_y = []
+        filtered_err = []
+        for xi, yi, ei in zip(x, y, yerr):
+            if abs(yi) > 0.0:
+                filtered_x.append(xi)
+                filtered_y.append(yi)
+                filtered_err.append(ei)
+        return filtered_x, filtered_y, filtered_err
+
+    fig, axes = plt.subplots(3, 1, figsize=(12, 16), sharex=True)
+
+    ns_rho, rho_f, rho_err_f = filter_nonzero(ns, rho_values, rho_stds)
+    axes[0].errorbar(
+        ns_rho,
+        rho_f,
+        yerr=rho_err_f,
+        marker="o",
+        linewidth=2.0,
+        capsize=6,
+        color=colors["rho"],
+        ecolor=colors["rho"],
+    )
+    axes[0].set_ylabel(
+        "Densidad de partículas\nfrescas entrantes\n$\\langle \\rho_f^{in} \\rangle$ (1/m²)",
+        labelpad=18,
+    )
+    axes[0].yaxis.set_label_coords(-0.23, 0.5)
+    axes[0].grid(True, which="major", alpha=0.25)
+
+    ns_v, v_f, v_err_f = filter_nonzero(ns, v_values, v_stds)
+    axes[1].errorbar(
+        ns_v,
+        v_f,
+        yerr=v_err_f,
+        marker="s",
+        linewidth=2.0,
+        capsize=6,
+        color=colors["v"],
+        ecolor=colors["v"],
+    )
+    axes[1].set_ylabel(
+        "Velocidad radial entrante\npromedio\n$|\\langle v_f^{in} \\rangle|$ (m/s)",
+        labelpad=18,
+    )
+    axes[1].yaxis.set_label_coords(-0.23, 0.5)
+    axes[1].grid(True, which="major", alpha=0.25)
+
+    ns_j, jin_f, jin_err_f = filter_nonzero(ns, jin_values, jin_stds)
+    axes[2].errorbar(
+        ns_j,
+        jin_f,
+        yerr=jin_err_f,
+        marker="^",
+        linewidth=2.0,
+        capsize=6,
+        color=colors["jin"],
+        ecolor=colors["jin"],
+    )
+    axes[2].set_ylabel(
+        "Flujo entrante\n$J_{in} = \\langle \\rho_f^{in} \\rangle |\\langle v_f^{in} \\rangle|$\n(1/(m·s))",
+        labelpad=18,
+    )
+    axes[2].yaxis.set_label_coords(-0.23, 0.5)
+    axes[2].set_xlabel("Numero de particulas N")
+    axes[2].grid(True, which="major", alpha=0.25)
+
+    fig.suptitle("S = 2", y=0.995)
+    fig.subplots_adjust(left=0.33, right=0.98, top=0.95, bottom=0.09, hspace=0.34)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        output_path.unlink()
+    fig.savefig(output_path, dpi=180)
+    if not output_path.exists():
+        raise RuntimeError(f"No se pudo escribir la figura S=2 en {output_path}")
+    plt.close(fig)
 
 
 def parse_output_radial_profiles_fast(
@@ -556,10 +771,10 @@ def main() -> None:
 
     for stat in stats:
         figure_path = args.profiles_dir / f"radial_profiles_n{stat.n_particles}.png"
-        plot_radial_profiles_per_n(stat=stat, output_path=figure_path)
+        plot_radial_profiles_per_n_v2(stat=stat, output_path=figure_path)
         print(f"Figura perfiles N={stat.n_particles} guardada en: {figure_path.resolve()}")
 
-    plot_s2_vs_n(stats=stats, target_s=args.target_s, output_path=args.s2_figure)
+    plot_s2_vs_n_v2(stats=stats, target_s=args.target_s, output_path=args.s2_figure)
     print(f"Figura capa cercana a S=2 guardada en: {args.s2_figure.resolve()}")
 
     write_summary_txt(stats=stats, target_s=args.target_s, summary_path=args.summary_txt)
