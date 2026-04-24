@@ -5,7 +5,7 @@ This module contains only the physical simulation engine for TP3 system 1.
 It does not compute observables or plots. The only responsibilities are:
 - Simulate event-driven molecular dynamics.
 - Apply the state/color transitions requested in the statement.
-- Write full system snapshots to text output files.
+- Write simulation output in delta-event format (`event-delta-v1`).
 - Write run metadata to a separate properties file.
 
 ## Dependencies
@@ -36,27 +36,27 @@ Script runner by platform:
 
 ## Build and Run
 
-From repository root:
+From the `simulation` directory:
 
 ```bash
-bash simulation/run.sh --n=200 --tf=5 --seed=123 --snapshot-every=1
+bash run.sh --n=200 --tf=5 --seed=123 --snapshot-every=1
 ```
 
 Windows PowerShell:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File simulation/run.ps1 --n=200 --tf=5 --seed=123 --snapshot-every=1
+powershell -ExecutionPolicy Bypass -File run.ps1 --n=200 --tf=5 --seed=123 --snapshot-every=1
 ```
 
 Windows CMD:
 
 ```bat
-simulation\run.bat --n=200 --tf=5 --seed=123 --snapshot-every=1
+run.bat --n=200 --tf=5 --seed=123 --snapshot-every=1
 ```
 
 Notes:
 - `run.bat` is the easiest entrypoint on Windows because it already applies `-ExecutionPolicy Bypass`.
-- `run.ps1` and `run.bat` compile Java sources into `simulation/bin` and then run `SimulationMain` with the provided arguments.
+- `run.ps1` and `run.bat` compile Java sources into `bin` and then run `SimulationMain` with the provided arguments.
 
 Useful options:
 
@@ -74,23 +74,20 @@ Modo de salida:
 - Modo normal: formato compacto por evento (`event-delta-v1`).
 - Excepcion para benchmark: `--no-output` (sin `output.txt`).
 
-Nota:
-- Las herramientas de visualizacion que parsean frames completos (`frame-particle-v1`) deben adaptarse a `event-delta-v1` o reconstruir frames.
-
 For full options:
 
 ```bash
-bash simulation/run.sh --help
+bash run.sh --help
 ```
 
 Equivalent help commands:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File simulation/run.ps1 --help
+powershell -ExecutionPolicy Bypass -File run.ps1 --help
 ```
 
 ```bat
-simulation\run.bat --help
+run.bat --help
 ```
 
 ## Output Organization
@@ -100,7 +97,7 @@ Each run generates one folder, either:
 - automatically under `--output-base-dir` using a generated run name.
 
 Inside each run folder:
-- `output.txt`: event snapshots
+- `output.txt`: delta events (`event-delta-v1`) cuando no se usa `--no-output`
 - `properties.txt`: run metadata
 
 ## `output.txt` format
@@ -131,6 +128,52 @@ Key-value metadata with simulation parameters and run summary, including:
 - execution time
 - output format version
 
-## Notes for Python postprocessing
+## Optional Animation Tool
 
-This module intentionally avoids any postprocessing and only produces raw state snapshots plus run properties. Python can ingest these files and compute all TP observables independently.
+This module also includes an optional script to generate an animation from a run folder:
+- `animate_run.py`
+
+Additional dependencies (only for animation):
+- Python 3.10+
+- `matplotlib`
+- `ffmpeg` (only for MP4; GIF export works without ffmpeg)
+
+Quick usage (from the `simulation` directory):
+
+```bash
+python animate_run.py --output outputs/animation_latest.mp4
+```
+
+Default run selection (when `--run-dir` is omitted):
+- latest valid run under `outputs`
+
+Animation for a specific run:
+
+```bash
+python animate_run.py \
+  --run-dir outputs/n100_rep1 \
+  --output outputs/animation_n100_rep1.mp4 \
+  --fps 24 \
+  --frame-step 1
+```
+
+Synchronized playback:
+
+```bash
+python animate_run.py \
+  --run-dir outputs/n100_rep1 \
+  --output outputs/animation_n100_rep1_sync.mp4 \
+  --sync-to-time \
+  --playback-speed 1.0
+```
+
+## Scope
+
+This module is a standalone Java simulation project.
+
+Its contract is to:
+- run the event-driven dynamics,
+- persist simulation outputs,
+- persist execution metadata.
+
+Any downstream analysis or visualization is intentionally out of scope for this module.
