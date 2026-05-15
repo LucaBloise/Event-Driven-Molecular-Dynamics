@@ -1033,7 +1033,9 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
             "con nombres <run-prefix>_nN_repR y reconstruye Cfc(t) desde output.txt."
         ),
     )
-    parser.set_defaults(reuse_existing_runs=True)
+    # Default to False so the script will run simulations when invoked by comparators
+    # (previously True caused the script to error if no pre-generated runs existed).
+    parser.set_defaults(reuse_existing_runs=False)
     parser.add_argument(
         "--results-csv",
         type=Path,
