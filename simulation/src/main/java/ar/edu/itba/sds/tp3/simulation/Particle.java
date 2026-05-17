@@ -75,6 +75,14 @@ public final class Particle {
         this.state = state;
     }
 
+    public void setVx(final double vx) {
+        this.vx = vx;
+    }
+
+    public void setVy(final double vy) {
+        this.vy = vy;
+    }
+
     public void advance(final double dt) {
         x += vx * dt;
         y += vy * dt;

@@ -3,6 +3,7 @@ package ar.edu.itba.sds.tp3.simulation;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -130,46 +131,23 @@ public final class EventDrivenSimulation {
         final double innerRadius = config.getInnerCollisionRadius();
         final double outerRadius = config.getOuterCollisionRadius();
         final double minCenterDistance = 2.0 * config.getParticleRadius();
-        final double innerSq = innerRadius * innerRadius;
-        final double outerSq = outerRadius * outerRadius;
 
-        for (int id = 0; id < config.getParticleCount(); id++) {
-            boolean placed = false;
+        // Strategy: try random placement first; if it fails, use hexagonal lattice.
+        boolean useRandomFirst = config.getParticleCount() <= 700;
+        boolean placedRandomly = useRandomFirst && placeRandomly(innerRadius, outerRadius, minCenterDistance);
+        
+        if (!placedRandomly) {
+            placeOnLattice(innerRadius, outerRadius, minCenterDistance);
+        }
 
-            for (int attempt = 0; attempt < config.getMaxPlacementAttemptsPerParticle(); attempt++) {
-                final double theta = random.nextDouble() * 2.0 * Math.PI;
-                final double radial = Math.sqrt(random.nextDouble() * (outerSq - innerSq) + innerSq);
-
-                final double x = radial * Math.cos(theta);
-                final double y = radial * Math.sin(theta);
-
-                if (overlapsExisting(x, y, minCenterDistance)) {
-                    continue;
-                }
-
-                final double direction = random.nextDouble() * 2.0 * Math.PI;
-                final double vx = config.getParticleSpeed() * Math.cos(direction);
-                final double vy = config.getParticleSpeed() * Math.sin(direction);
-
-                particles.add(new Particle(
-                        id,
-                        x,
-                        y,
-                        vx,
-                        vy,
-                        config.getParticleMass(),
-                        config.getParticleRadius(),
-                        ParticleState.FRESH
-                ));
-                placed = true;
-                break;
-            }
-
-            if (!placed) {
-                throw new IllegalStateException(
-                        "Could not place all particles without overlap. Try lowering --n or increasing --max-placement-attempts"
-                );
-            }
+        // Set velocities for all particles
+        for (int id = 0; id < particles.size(); id++) {
+            final Particle p = particles.get(id);
+            final double direction = random.nextDouble() * 2.0 * Math.PI;
+            final double vx = config.getParticleSpeed() * Math.cos(direction);
+            final double vy = config.getParticleSpeed() * Math.sin(direction);
+            p.setVx(vx);
+            p.setVy(vy);
         }
     }
 
@@ -184,6 +162,107 @@ public final class EventDrivenSimulation {
             }
         }
         return false;
+    }
+
+    private boolean placeRandomly(final double innerRadius, final double outerRadius, final double minCenterDistance) {
+        final int n = config.getParticleCount();
+        final double innerSq = innerRadius * innerRadius;
+        final double outerSq = outerRadius * outerRadius;
+        final int maxAttempts = Math.max(20000, 50 * n);
+
+        for (int id = 0; id < n; id++) {
+            boolean placed = false;
+            for (int attempt = 0; attempt < maxAttempts; attempt++) {
+                final double theta = random.nextDouble() * 2.0 * Math.PI;
+                final double radial = Math.sqrt(random.nextDouble() * (outerSq - innerSq) + innerSq);
+                final double x = radial * Math.cos(theta);
+                final double y = radial * Math.sin(theta);
+
+                if (overlapsExisting(x, y, minCenterDistance)) {
+                    continue;
+                }
+
+                particles.add(new Particle(
+                        id,
+                        x,
+                        y,
+                        0.0,
+                        0.0,
+                        config.getParticleMass(),
+                        config.getParticleRadius(),
+                        ParticleState.FRESH
+                ));
+                placed = true;
+                break;
+            }
+            if (!placed) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void placeOnLattice(final double innerRadius, final double outerRadius, final double minCenterDistance) {
+        final double r = config.getParticleRadius();
+        final double dx = 2.0 * r;
+        final double dy = Math.sqrt(3.0) * r;
+
+        List<Position> bestPositions = buildHexLatticePositions(outerRadius, innerRadius, dx, dy, 0.0, 0.0);
+
+        // Try multiple lattice offsets and keep the densest valid arrangement.
+        for (int attempt = 0; attempt < 32; attempt++) {
+            final double shiftX = random.nextDouble() * dx;
+            final double shiftY = random.nextDouble() * dy;
+            final List<Position> candidate = buildHexLatticePositions(outerRadius, innerRadius, dx, dy, shiftX, shiftY);
+            if (candidate.size() > bestPositions.size()) {
+                bestPositions = candidate;
+            }
+        }
+
+        if (bestPositions.size() < config.getParticleCount()) {
+            throw new IllegalStateException(
+                    "Not enough lattice positions for N=" + config.getParticleCount()
+                            + " (max=" + bestPositions.size() + "). Increase domain or decrease particle count."
+            );
+        }
+
+        Collections.shuffle(bestPositions, random);
+        for (int id = 0; id < config.getParticleCount(); id++) {
+            final Position p = bestPositions.get(id);
+            particles.add(new Particle(
+                    id,
+                    p.x,
+                    p.y,
+                    0.0,
+                    0.0,
+                    config.getParticleMass(),
+                    config.getParticleRadius(),
+                    ParticleState.FRESH
+            ));
+        }
+    }
+
+    private List<Position> buildHexLatticePositions(final double outerRadius,
+                                                     final double innerRadius,
+                                                     final double dx,
+                                                     final double dy,
+                                                     final double shiftX,
+                                                     final double shiftY) {
+        final List<Position> positions = new ArrayList<>();
+        int row = 0;
+
+        for (double yy = -outerRadius + shiftY; yy <= outerRadius + 1e-12; yy += dy) {
+            final double rowOffset = (row % 2 == 0) ? 0.0 : dx / 2.0;
+            for (double xx = -outerRadius + rowOffset + shiftX; xx <= outerRadius + 1e-12; xx += dx) {
+                final double dist = Math.sqrt(xx * xx + yy * yy);
+                if (dist >= innerRadius && dist <= outerRadius) {
+                    positions.add(new Position(xx, yy));
+                }
+            }
+            row++;
+        }
+
+        return positions;
     }
 
     private void scheduleInitialEvents() {
@@ -385,6 +464,16 @@ public final class EventDrivenSimulation {
             this.particleA = particleA;
             this.particleB = particleB;
             this.changedParticles = changedParticles;
+        }
+    }
+
+    private static final class Position {
+        final double x;
+        final double y;
+
+        Position(final double x, final double y) {
+            this.x = x;
+            this.y = y;
         }
     }
 }
